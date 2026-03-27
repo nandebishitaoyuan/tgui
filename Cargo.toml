@@ -10,6 +10,14 @@ readme = "README.md"
 keywords = ["gui", "graphics", "wgpu", "ui"]
 categories = ["gui", "rendering"]
 
+exclude = [
+    "target/*",
+    "*.png",
+    "*.ttf",
+    "assets/*",
+    ".github/*"
+]
+
 [dependencies]
 bytemuck = { version = "1.24", features = ["derive"] }
 cosmic-text = "0.18"
