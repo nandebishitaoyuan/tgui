@@ -1,10 +1,11 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cosmic_text::fontdb::{Family, ID, Query, Stretch, Style, Weight};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, Wrap};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontWeight(pub u16);
 
 impl FontWeight {
@@ -67,6 +68,17 @@ pub(crate) struct FontManager {
     font_system: RefCell<FontSystem>,
     aliases: Vec<(String, String)>,
     default_font: Option<String>,
+    measure_cache: RefCell<HashMap<TextMeasureKey, (f32, f32)>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TextMeasureKey {
+    text: String,
+    preferred_font: Option<String>,
+    weight: FontWeight,
+    font_size_bits: u32,
+    line_height_bits: u32,
+    letter_spacing_bits: u32,
 }
 
 impl FontManager {
@@ -90,6 +102,7 @@ impl FontManager {
             font_system: RefCell::new(font_system),
             aliases,
             default_font: catalog.default_font.clone(),
+            measure_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -123,6 +136,18 @@ impl FontManager {
             return (32.0, (font_size * 1.6).max(24.0));
         }
 
+        let cache_key = TextMeasureKey {
+            text: text.to_string(),
+            preferred_font: request.preferred_font.map(ToString::to_string),
+            weight: request.weight,
+            font_size_bits: font_size.to_bits(),
+            line_height_bits: line_height.to_bits(),
+            letter_spacing_bits: letter_spacing.to_bits(),
+        };
+        if let Some(cached) = self.measure_cache.borrow().get(&cache_key) {
+            return *cached;
+        }
+
         let resolved = self.resolve_text(text, request.clone());
         let mut font_system = self.font_system.borrow_mut();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
@@ -142,7 +167,13 @@ impl FontManager {
             height = height.max(run.line_top + run.line_height);
         }
 
-        (width.max(32.0).ceil(), height.max(24.0).ceil())
+        let measured = (width.max(32.0).ceil(), height.max(24.0).ceil());
+        let mut cache = self.measure_cache.borrow_mut();
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert(cache_key, measured);
+        measured
     }
 
     fn resolve_family_name(&self, name: &str, weight: FontWeight) -> Option<String> {

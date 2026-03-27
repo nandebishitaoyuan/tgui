@@ -9,7 +9,7 @@ fn main() -> Result<(), tgui::TguiError> {
         r: 0.06,
         g: 0.08,
         b: 0.10,
-        a: 1.0,
+        a: 0.0,
     };
     theme.palette.surface = wgpu::Color {
         r: 0.12,
