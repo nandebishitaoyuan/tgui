@@ -307,11 +307,23 @@ impl Renderer {
             self.config.width as f32,
             self.config.height as f32,
         );
+        let overlay_rect_vertices = RectVertex::from_primitives(
+            &scene.overlay_shapes,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
         let rect_vertex_buffer =
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("tgui-rect-vertices"),
                     contents: bytemuck::cast_slice(&rect_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+        let overlay_rect_vertex_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tgui-overlay-rect-vertices"),
+                    contents: bytemuck::cast_slice(&overlay_rect_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
 
@@ -378,6 +390,12 @@ impl Renderer {
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     pass.draw(0..6, 0..1);
                 }
+            }
+
+            if !overlay_rect_vertices.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, overlay_rect_vertex_buffer.slice(..));
+                pass.draw(0..overlay_rect_vertices.len() as u32, 0..1);
             }
         }
 

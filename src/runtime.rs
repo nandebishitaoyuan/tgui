@@ -415,8 +415,8 @@ impl ApplicationHandler for RuntimeHandler {
         }
 
         if let Some(window) = self.window.as_ref() {
-            window.set_visible(true);
             window.request_redraw();
+            window.set_visible(true);
         }
     }
 
@@ -517,8 +517,8 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
         }
 
         if let Some(window) = self.window.as_ref() {
-            window.set_visible(true);
             window.request_redraw();
+            window.set_visible(true);
         }
     }
 

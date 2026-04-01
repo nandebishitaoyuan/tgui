@@ -19,7 +19,6 @@ fn main() -> Result<(), tgui::TguiError> {
             Column::new()
                 .align(Align::Center)
                 .fill_size()
-                .background(Color::hex(0xFF1F26))
                 .padding(Insets::all(20.0))
                 .gap(16.0)
                 .child(

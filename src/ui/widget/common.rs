@@ -113,6 +113,7 @@ pub struct TextPrimitive {
 pub struct ScenePrimitives {
     pub shapes: Vec<RenderPrimitive>,
     pub texts: Vec<TextPrimitive>,
+    pub overlay_shapes: Vec<RenderPrimitive>,
 }
 
 #[derive(Clone, Copy, Debug)]

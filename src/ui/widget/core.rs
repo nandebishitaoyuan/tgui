@@ -193,6 +193,8 @@ impl<VM> Element<VM> {
                     &mut computed.scene,
                     false,
                     text.layout.padding,
+                    None,
+                    context.theme.palette.text,
                 );
             }
             WidgetKind::Button { label, on_click } => {
@@ -204,6 +206,8 @@ impl<VM> Element<VM> {
                     &mut computed.scene,
                     false,
                     self.layout.padding,
+                    None,
+                    context.theme.palette.text,
                 );
                 if let Some(command) = on_click.clone() {
                     computed.hit_regions.push(HitRegion {
@@ -218,8 +222,14 @@ impl<VM> Element<VM> {
                 on_change,
             } => {
                 let active = context.focused_input == Some(self.id);
-                let has_text = !text.content.resolve().is_empty();
+                let current_text = text.content.resolve();
+                let has_text = !current_text.is_empty();
                 let text_to_draw = if has_text { text } else { placeholder };
+                let fallback_color = if has_text {
+                    context.theme.palette.text
+                } else {
+                    context.theme.palette.text_muted
+                };
                 push_text_primitives(
                     text_to_draw,
                     frame,
@@ -228,13 +238,15 @@ impl<VM> Element<VM> {
                     &mut computed.scene,
                     active,
                     self.layout.padding,
+                    Some(current_text.as_str()),
+                    fallback_color,
                 );
                 computed.hit_regions.push(HitRegion {
                     rect: frame,
                     interaction: HitInteraction::FocusInput {
                         id: self.id,
                         on_change: on_change.clone(),
-                        text: text.content.resolve(),
+                        text: current_text,
                     },
                 });
             }
@@ -410,24 +422,24 @@ fn push_text_primitives(
     scene: &mut ScenePrimitives,
     show_caret: bool,
     padding: Insets,
+    caret_content: Option<&str>,
+    fallback_color: Color,
 ) {
     let content = text.content.resolve();
-    let resolved = font_manager.resolve_text(
-        &content,
-        TextFontRequest {
-            preferred_font: text
-                .font_family
-                .as_deref()
-                .or(theme.typography.font_family.as_deref()),
-            weight: text.font_weight,
-        },
-    );
+    let text_request = TextFontRequest {
+        preferred_font: text
+            .font_family
+            .as_deref()
+            .or(theme.typography.font_family.as_deref()),
+        weight: text.font_weight,
+    };
+    let resolved = font_manager.resolve_text(&content, text_request.clone());
 
     let color = text
         .color
         .as_ref()
         .map(Value::resolve)
-        .unwrap_or(theme.palette.text);
+        .unwrap_or(fallback_color);
     let font_size = text
         .font_size
         .unwrap_or(theme.typography.font_size.max(1.0));
@@ -435,13 +447,7 @@ fn push_text_primitives(
     let inner = frame.inset(padding);
     let (measured_width, measured_height) = font_manager.measure_text(
         &content,
-        TextFontRequest {
-            preferred_font: text
-                .font_family
-                .as_deref()
-                .or(theme.typography.font_family.as_deref()),
-            weight: text.font_weight,
-        },
+        text_request.clone(),
         font_size,
         line_height,
         text.letter_spacing,
@@ -457,7 +463,7 @@ fn push_text_primitives(
     );
 
     scene.texts.push(TextPrimitive {
-        content,
+        content: content.clone(),
         frame: content_frame,
         color,
         font_family: Some(resolved.primary_font),
@@ -468,9 +474,21 @@ fn push_text_primitives(
     });
 
     if show_caret {
-        let caret_x = (content_frame.x + content_frame.width - 2.0).max(content_frame.x);
-        scene.shapes.push(RenderPrimitive {
-            rect: Rect::new(caret_x, frame.y + 8.0, 2.0, frame.height - 16.0),
+        let caret_text = caret_content.unwrap_or(content.as_str());
+        let (caret_width, _) = if caret_text.is_empty() {
+            (0.0, line_height)
+        } else {
+            font_manager.measure_text_raw(
+                caret_text,
+                text_request,
+                font_size,
+                line_height,
+                text.letter_spacing,
+            )
+        };
+        let caret_x = (inner.x + inner.width.min(caret_width) + 1.0).max(inner.x);
+        scene.overlay_shapes.push(RenderPrimitive {
+            rect: Rect::new(caret_x, content_frame.y, 2.0, content_frame.height.max(line_height)),
             color: theme.palette.text,
         });
     }

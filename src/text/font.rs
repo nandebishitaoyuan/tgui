@@ -132,8 +132,20 @@ impl FontManager {
         line_height: f32,
         letter_spacing: f32,
     ) -> (f32, f32) {
+        let measured = self.measure_text_raw(text, request, font_size, line_height, letter_spacing);
+        (measured.0.max(32.0).ceil(), measured.1.max(24.0).ceil())
+    }
+
+    pub(crate) fn measure_text_raw(
+        &self,
+        text: &str,
+        request: TextFontRequest<'_>,
+        font_size: f32,
+        line_height: f32,
+        letter_spacing: f32,
+    ) -> (f32, f32) {
         if text.is_empty() {
-            return (32.0, (font_size * 1.6).max(24.0));
+            return (0.0, line_height.ceil());
         }
 
         let cache_key = TextMeasureKey {
@@ -167,7 +179,7 @@ impl FontManager {
             height = height.max(run.line_top + run.line_height);
         }
 
-        let measured = (width.max(32.0).ceil(), height.max(24.0).ceil());
+        let measured = (width.max(0.0).ceil(), height.max(line_height).ceil());
         let mut cache = self.measure_cache.borrow_mut();
         if cache.len() > 4096 {
             cache.clear();

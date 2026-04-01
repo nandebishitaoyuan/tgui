@@ -84,12 +84,24 @@ impl<VM> Input<VM> {
         self
     }
 
-    pub fn placeholder(mut self, placeholder: Text) -> Self {
+    pub fn placeholder_with_text(mut self, placeholder: Text) -> Self {
         if let WidgetKind::Input {
             placeholder: value, ..
         } = &mut self.element.kind
         {
             *value = placeholder;
+        }
+        self
+    }
+
+    pub fn placeholder_with_str(mut self, placeholder: &str) -> Self {
+        let text = Text::new(placeholder.to_string()).into();
+
+        if let WidgetKind::Input {
+            placeholder: value, ..
+        } = &mut self.element.kind
+        {
+            *value = text;
         }
         self
     }
