@@ -14,6 +14,22 @@ use super::text::Text;
 static NEXT_WIDGET_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CursorStyle {
+    Default,
+    Pointer,
+    Text,
+    Crosshair,
+    Move,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    EwResize,
+    NsResize,
+    NeswResize,
+    NwseResize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WidgetId(u64);
 
 impl WidgetId {
@@ -128,6 +144,7 @@ pub(crate) struct InteractionHandlers<VM> {
     pub on_mouse_enter: Option<Command<VM>>,
     pub on_mouse_leave: Option<Command<VM>>,
     pub on_mouse_move: Option<ValueCommand<VM, Point>>,
+    pub cursor_style: Option<CursorStyle>,
 }
 
 impl<VM> Clone for InteractionHandlers<VM> {
@@ -140,6 +157,7 @@ impl<VM> Clone for InteractionHandlers<VM> {
             on_mouse_enter: self.on_mouse_enter.clone(),
             on_mouse_leave: self.on_mouse_leave.clone(),
             on_mouse_move: self.on_mouse_move.clone(),
+            cursor_style: self.cursor_style,
         }
     }
 }
@@ -154,6 +172,7 @@ impl<VM> Default for InteractionHandlers<VM> {
             on_mouse_enter: None,
             on_mouse_leave: None,
             on_mouse_move: None,
+            cursor_style: None,
         }
     }
 }
@@ -167,6 +186,7 @@ impl<VM> InteractionHandlers<VM> {
             || self.on_mouse_enter.is_some()
             || self.on_mouse_leave.is_some()
             || self.on_mouse_move.is_some()
+            || self.cursor_style.is_some()
     }
 }
 

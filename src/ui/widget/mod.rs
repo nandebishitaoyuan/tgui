@@ -10,7 +10,9 @@ pub(crate) use common::{
     CompositionState, HitInteraction, InputEditState, InputSnapshot, RenderedWidgetScene,
     ScrollbarAxis, ScrollbarHandle,
 };
-pub use common::{Point, Rect, RenderPrimitive, ScenePrimitives, TextPrimitive, WidgetId};
+pub use common::{
+    CursorStyle, Point, Rect, RenderPrimitive, ScenePrimitives, TextPrimitive, WidgetId,
+};
 pub use container::{Column, Container, Flex, Grid, Row, Stack};
 pub use core::{rect, Element, WidgetCommand, WidgetEventResult, WidgetTree};
 pub use input::Input;

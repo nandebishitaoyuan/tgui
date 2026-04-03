@@ -5,7 +5,8 @@ use crate::ui::layout::{
 };
 
 use super::common::{
-    ContainerKind, ContainerLayout, InteractionHandlers, Point, VisualStyle, WidgetId, WidgetKind,
+    ContainerKind, ContainerLayout, CursorStyle, InteractionHandlers, Point, VisualStyle, WidgetId,
+    WidgetKind,
 };
 use super::core::Element;
 
@@ -117,6 +118,11 @@ impl<VM> Container<VM> {
 
     pub fn on_mouse_move(mut self, command: ValueCommand<VM, Point>) -> Self {
         self.element.interactions.on_mouse_move = Some(command);
+        self
+    }
+
+    pub fn cursor(mut self, cursor: CursorStyle) -> Self {
+        self.element.interactions.cursor_style = Some(cursor);
         self
     }
 
@@ -384,6 +390,10 @@ macro_rules! impl_layout_container {
                 Self(self.0.on_mouse_move(command))
             }
 
+            pub fn cursor(self, cursor: CursorStyle) -> Self {
+                Self(self.0.cursor(cursor))
+            }
+
             pub fn child(self, child: impl IntoChildren<VM>) -> Self {
                 Self(self.0.child(child))
             }
@@ -626,6 +636,15 @@ mod tests {
         assert_eq!(
             layout.scrollbar_style.active_thumb_color,
             Color::hexa(0x55667788)
+        );
+    }
+
+    #[test]
+    fn cursor_helper_sets_cursor_style() {
+        let container = Container::<()>::new().cursor(CursorStyle::Pointer);
+        assert_eq!(
+            container.element.interactions.cursor_style,
+            Some(CursorStyle::Pointer)
         );
     }
 }

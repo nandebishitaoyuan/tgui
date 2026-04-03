@@ -2,7 +2,7 @@ use crate::foundation::color::Color;
 use crate::foundation::view_model::{Command, ValueCommand};
 use crate::ui::layout::{Insets, LayoutStyle, Value};
 
-use super::common::{InteractionHandlers, Point, VisualStyle, WidgetId, WidgetKind};
+use super::common::{CursorStyle, InteractionHandlers, Point, VisualStyle, WidgetId, WidgetKind};
 use super::core::Element;
 use super::text::Text;
 
@@ -150,6 +150,11 @@ impl<VM> Button<VM> {
 
     pub fn on_mouse_move(mut self, command: ValueCommand<VM, Point>) -> Self {
         self.element.interactions.on_mouse_move = Some(command);
+        self
+    }
+
+    pub fn cursor(mut self, cursor: CursorStyle) -> Self {
+        self.element.interactions.cursor_style = Some(cursor);
         self
     }
 }

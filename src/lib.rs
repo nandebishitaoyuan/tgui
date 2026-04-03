@@ -30,6 +30,6 @@ pub use ui::layout::{
 };
 pub use ui::theme::{Theme, ThemeMode};
 pub use ui::widget::{
-    rect, Button, Column, Container, Element, Flex, Grid, Input, Point, Rect, Row, Stack, Text,
-    WidgetCommand, WidgetEventResult, WidgetId, WidgetTree,
+    rect, Button, Column, Container, CursorStyle, Element, Flex, Grid, Input, Point, Rect, Row,
+    Stack, Text, WidgetCommand, WidgetEventResult, WidgetId, WidgetTree,
 };

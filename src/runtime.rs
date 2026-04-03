@@ -231,7 +231,7 @@ struct FocusedWidget<VM> {
 
 struct HoveredWidget<VM> {
     widget_id: WidgetId,
-    prefers_text_cursor: bool,
+    cursor_style: Option<crate::ui::widget::CursorStyle>,
     on_mouse_enter: Option<Command<VM>>,
     on_mouse_leave: Option<Command<VM>>,
     on_mouse_move: Option<crate::foundation::view_model::ValueCommand<VM, Point>>,
@@ -998,23 +998,27 @@ impl<VM> BoundRuntimeHandler<VM> {
                     self.focused_input,
                 )
                 .into_iter()
-                .map(|interaction| {
-                    let prefers_text_cursor =
-                        matches!(&interaction, HitInteraction::FocusInput { .. });
-                    match interaction {
-                        HitInteraction::Widget {
-                            id, interactions, ..
-                        }
-                        | HitInteraction::FocusInput {
-                            id, interactions, ..
-                        } => HoveredWidget {
-                            widget_id: id,
-                            prefers_text_cursor,
-                            on_mouse_enter: interactions.on_mouse_enter,
-                            on_mouse_leave: interactions.on_mouse_leave,
-                            on_mouse_move: interactions.on_mouse_move,
-                        },
-                    }
+                .map(|interaction| match interaction {
+                    HitInteraction::Widget {
+                        id, interactions, ..
+                    } => HoveredWidget {
+                        widget_id: id,
+                        cursor_style: interactions.cursor_style,
+                        on_mouse_enter: interactions.on_mouse_enter,
+                        on_mouse_leave: interactions.on_mouse_leave,
+                        on_mouse_move: interactions.on_mouse_move,
+                    },
+                    HitInteraction::FocusInput {
+                        id, interactions, ..
+                    } => HoveredWidget {
+                        widget_id: id,
+                        cursor_style: interactions
+                            .cursor_style
+                            .or(Some(crate::ui::widget::CursorStyle::Text)),
+                        on_mouse_enter: interactions.on_mouse_enter,
+                        on_mouse_leave: interactions.on_mouse_leave,
+                        on_mouse_move: interactions.on_mouse_move,
+                    },
                 })
                 .collect()
             })
@@ -1259,13 +1263,12 @@ impl<VM> BoundRuntimeHandler<VM> {
                 Cursor::Icon(CursorIcon::Pointer)
             } else if self.hovered_scrollbar.is_some() {
                 Cursor::Icon(CursorIcon::Pointer)
-            } else if self
+            } else if let Some(cursor_style) = self
                 .hovered_widgets
                 .last()
-                .map(|hovered| hovered.prefers_text_cursor)
-                .unwrap_or(false)
+                .and_then(|hovered| hovered.cursor_style)
             {
-                Cursor::Icon(CursorIcon::Text)
+                Cursor::Icon(cursor_icon(cursor_style))
             } else {
                 Cursor::Icon(CursorIcon::Default)
             };
@@ -1754,6 +1757,23 @@ fn mouse_scroll_delta(delta: MouseScrollDelta) -> Point {
             x: position.x as f32,
             y: position.y as f32,
         },
+    }
+}
+
+fn cursor_icon(cursor_style: crate::ui::widget::CursorStyle) -> CursorIcon {
+    match cursor_style {
+        crate::ui::widget::CursorStyle::Default => CursorIcon::Default,
+        crate::ui::widget::CursorStyle::Pointer => CursorIcon::Pointer,
+        crate::ui::widget::CursorStyle::Text => CursorIcon::Text,
+        crate::ui::widget::CursorStyle::Crosshair => CursorIcon::Crosshair,
+        crate::ui::widget::CursorStyle::Move => CursorIcon::Move,
+        crate::ui::widget::CursorStyle::NotAllowed => CursorIcon::NotAllowed,
+        crate::ui::widget::CursorStyle::Grab => CursorIcon::Grab,
+        crate::ui::widget::CursorStyle::Grabbing => CursorIcon::Grabbing,
+        crate::ui::widget::CursorStyle::EwResize => CursorIcon::EwResize,
+        crate::ui::widget::CursorStyle::NsResize => CursorIcon::NsResize,
+        crate::ui::widget::CursorStyle::NeswResize => CursorIcon::NeswResize,
+        crate::ui::widget::CursorStyle::NwseResize => CursorIcon::NwseResize,
     }
 }
 

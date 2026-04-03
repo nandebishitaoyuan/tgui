@@ -3,7 +3,7 @@ use crate::foundation::view_model::{Command, ValueCommand};
 use crate::text::font::FontWeight;
 use crate::ui::layout::{Insets, LayoutStyle, Value};
 
-use super::common::{InteractionHandlers, Point, VisualStyle, WidgetId, WidgetKind};
+use super::common::{CursorStyle, InteractionHandlers, Point, VisualStyle, WidgetId, WidgetKind};
 use super::core::Element;
 
 #[derive(Clone)]
@@ -17,6 +17,7 @@ pub struct Text {
     pub(crate) font_size: Option<f32>,
     pub(crate) font_weight: FontWeight,
     pub(crate) letter_spacing: f32,
+    pub(crate) cursor_style: Option<CursorStyle>,
 }
 
 impl Text {
@@ -31,6 +32,7 @@ impl Text {
             font_size: None,
             font_weight: FontWeight::NORMAL,
             letter_spacing: 0.0,
+            cursor_style: None,
         }
     }
 
@@ -140,13 +142,19 @@ impl Text {
         })
     }
 
+    pub fn cursor(mut self, cursor: CursorStyle) -> Self {
+        self.cursor_style = Some(cursor);
+        self
+    }
+
     fn into_element_with_interactions<VM>(
         self,
-        interactions: InteractionHandlers<VM>,
+        mut interactions: InteractionHandlers<VM>,
     ) -> Element<VM> {
         let background = self.background.clone();
         let layout = self.layout.clone();
         let visual = self.visual.clone();
+        interactions.cursor_style = self.cursor_style;
         Element {
             id: WidgetId::next(),
             layout,
@@ -167,7 +175,10 @@ impl<VM> From<Text> for Element<VM> {
             id: WidgetId::next(),
             layout,
             visual,
-            interactions: InteractionHandlers::default(),
+            interactions: InteractionHandlers {
+                cursor_style: value.cursor_style,
+                ..InteractionHandlers::default()
+            },
             background,
             kind: WidgetKind::Text { text: value },
         }
