@@ -7,7 +7,7 @@ use crate::animation::{
     WindowProperty,
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{
@@ -25,7 +25,7 @@ use crate::text::font::FontManager;
 use crate::ui::theme::{Theme, ThemeMode};
 use crate::ui::widget::{
     HitInteraction, InputEditState, InputSnapshot, Point, Rect, RenderedWidgetScene,
-    ScenePrimitives, WidgetId, WidgetTree,
+    ScenePrimitives, ScrollbarAxis, ScrollbarHandle, WidgetId, WidgetTree,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -193,12 +193,16 @@ struct BoundRuntimeHandler<VM> {
     cursor_position: Option<Point>,
     modifiers: ModifiersState,
     hovered_widgets: Vec<HoveredWidget<VM>>,
+    hovered_scrollbar: Option<ScrollbarHandle>,
+    active_scrollbar_drag: Option<ScrollbarDrag>,
     pending_click: Option<PendingClick<VM>>,
     focused_widget: Option<FocusedWidget<VM>>,
     focused_input: Option<WidgetId>,
     input_states: HashMap<WidgetId, InputEditState>,
     clipboard: ClipboardService,
     cached_scene: Option<CachedScene>,
+    scroll_states: HashMap<WidgetId, Point>,
+    scroll_epoch: u64,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     window_id: Option<WindowId>,
@@ -210,6 +214,7 @@ struct CachedScene {
     focused_input: Option<WidgetId>,
     caret_visible: bool,
     animation_epoch: u64,
+    scroll_epoch: u64,
     rendered: RenderedWidgetScene,
 }
 
@@ -230,6 +235,16 @@ struct HoveredWidget<VM> {
     on_mouse_enter: Option<Command<VM>>,
     on_mouse_leave: Option<Command<VM>>,
     on_mouse_move: Option<crate::foundation::view_model::ValueCommand<VM, Point>>,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollbarDrag {
+    handle: ScrollbarHandle,
+    start_cursor: Point,
+    start_scroll_offset: Point,
+    track: Rect,
+    thumb: Rect,
+    max_offset: f32,
 }
 
 #[derive(Default)]
@@ -299,12 +314,16 @@ impl<VM> BoundRuntimeHandler<VM> {
             cursor_position: None,
             modifiers: ModifiersState::default(),
             hovered_widgets: Vec::new(),
+            hovered_scrollbar: None,
+            active_scrollbar_drag: None,
             pending_click: None,
             focused_widget: None,
             focused_input: None,
             input_states: HashMap::new(),
             clipboard: ClipboardService::default(),
             cached_scene: None,
+            scroll_states: HashMap::new(),
+            scroll_epoch: 0,
             window: None,
             renderer: None,
             window_id: None,
@@ -397,6 +416,7 @@ impl<VM> BoundRuntimeHandler<VM> {
                 && cached.focused_input == self.focused_input
                 && cached.caret_visible == caret_visible
                 && cached.animation_epoch == self.animation_epoch
+                && cached.scroll_epoch == self.scroll_epoch
             {
                 return cached.rendered.clone();
             }
@@ -408,6 +428,9 @@ impl<VM> BoundRuntimeHandler<VM> {
                 &self.font_manager,
                 &theme,
                 &mut self.animation_engine,
+                self.hovered_scrollbar,
+                self.active_scrollbar_drag.map(|drag| drag.handle),
+                &self.scroll_states,
                 viewport,
                 self.focused_input,
                 focused_input_state.as_ref(),
@@ -420,6 +443,7 @@ impl<VM> BoundRuntimeHandler<VM> {
             focused_input: self.focused_input,
             caret_visible,
             animation_epoch: self.animation_epoch,
+            scroll_epoch: self.scroll_epoch,
             rendered: rendered.clone(),
         });
         rendered
@@ -442,6 +466,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         matches!(
             event,
             WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseWheel { .. }
                 | WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -948,6 +973,9 @@ impl<VM> BoundRuntimeHandler<VM> {
             &self.font_manager,
             &self.theme,
             &mut self.animation_engine,
+            self.hovered_scrollbar,
+            self.active_scrollbar_drag.map(|drag| drag.handle),
+            &self.scroll_states,
             viewport,
             self.cursor_position,
             self.focused_input,
@@ -962,6 +990,9 @@ impl<VM> BoundRuntimeHandler<VM> {
                     &self.font_manager,
                     &self.theme,
                     &mut self.animation_engine,
+                    self.hovered_scrollbar,
+                    self.active_scrollbar_drag.map(|drag| drag.handle),
+                    &self.scroll_states,
                     viewport,
                     self.cursor_position,
                     self.focused_input,
@@ -1029,9 +1060,206 @@ impl<VM> BoundRuntimeHandler<VM> {
         }
 
         self.hovered_widgets = next_hovered;
+        self.sync_scrollbar_hover();
+        self.update_cursor_icon();
+    }
 
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) -> bool {
+        let Some(cursor_position) = self.cursor_position else {
+            return false;
+        };
+
+        let mut scroll_delta = mouse_scroll_delta(delta);
+        if scroll_delta.x.abs() <= f32::EPSILON && self.modifiers.shift_key() {
+            scroll_delta.x = scroll_delta.y;
+            scroll_delta.y = 0.0;
+        }
+        if scroll_delta.x.abs() <= f32::EPSILON && scroll_delta.y.abs() <= f32::EPSILON {
+            return false;
+        }
+
+        let rendered = self.render_primitives();
+        for region in rendered.scroll_regions.iter().rev().copied() {
+            if region.visible_frame.is_empty() || !region.visible_frame.contains(cursor_position) {
+                continue;
+            }
+
+            let max_offset = region.max_offset();
+            let mut next_offset = region.scroll_offset;
+            if region.can_scroll_x() {
+                next_offset.x = (next_offset.x - scroll_delta.x).clamp(0.0, max_offset.x);
+            }
+            if region.can_scroll_y() {
+                next_offset.y = (next_offset.y - scroll_delta.y).clamp(0.0, max_offset.y);
+            }
+
+            if (next_offset.x - region.scroll_offset.x).abs() > 0.01
+                || (next_offset.y - region.scroll_offset.y).abs() > 0.01
+            {
+                self.set_scroll_offset(region.id, next_offset);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn sync_scrollbar_hover(&mut self) {
+        let next_hovered = if let Some(drag) = self.active_scrollbar_drag {
+            Some(drag.handle)
+        } else {
+            self.scrollbar_thumb_hit()
+        };
+
+        if self.hovered_scrollbar != next_hovered {
+            self.hovered_scrollbar = next_hovered;
+            self.invalidate_scene();
+        }
+    }
+
+    fn scrollbar_thumb_hit(&mut self) -> Option<ScrollbarHandle> {
+        let cursor_position = self.cursor_position?;
+        let rendered = self.render_primitives();
+        rendered.scroll_regions.iter().rev().find_map(|region| {
+            if region.visible_frame.is_empty() || !region.visible_frame.contains(cursor_position) {
+                return None;
+            }
+            if region
+                .vertical_thumb
+                .map(|thumb| thumb.contains(cursor_position))
+                .unwrap_or(false)
+            {
+                return Some(ScrollbarHandle {
+                    id: region.id,
+                    axis: ScrollbarAxis::Vertical,
+                });
+            }
+            if region
+                .horizontal_thumb
+                .map(|thumb| thumb.contains(cursor_position))
+                .unwrap_or(false)
+            {
+                return Some(ScrollbarHandle {
+                    id: region.id,
+                    axis: ScrollbarAxis::Horizontal,
+                });
+            }
+            None
+        })
+    }
+
+    fn begin_scrollbar_drag(&mut self) -> bool {
+        let Some(handle) = self.scrollbar_thumb_hit() else {
+            return false;
+        };
+        let Some(cursor_position) = self.cursor_position else {
+            return false;
+        };
+        let rendered = self.render_primitives();
+        let Some(region) = rendered
+            .scroll_regions
+            .iter()
+            .copied()
+            .find(|region| region.id == handle.id)
+        else {
+            return false;
+        };
+
+        let (track, thumb, max_offset) = match handle.axis {
+            ScrollbarAxis::Horizontal => (
+                region.horizontal_track,
+                region.horizontal_thumb,
+                region.max_offset().x,
+            ),
+            ScrollbarAxis::Vertical => (
+                region.vertical_track,
+                region.vertical_thumb,
+                region.max_offset().y,
+            ),
+        };
+        let (Some(track), Some(thumb)) = (track, thumb) else {
+            return false;
+        };
+
+        self.active_scrollbar_drag = Some(ScrollbarDrag {
+            handle,
+            start_cursor: cursor_position,
+            start_scroll_offset: region.scroll_offset,
+            track,
+            thumb,
+            max_offset,
+        });
+        self.hovered_scrollbar = Some(handle);
+        self.invalidate_scene();
+        true
+    }
+
+    fn handle_scrollbar_drag(&mut self) -> bool {
+        let Some(drag) = self.active_scrollbar_drag else {
+            return false;
+        };
+        let Some(cursor_position) = self.cursor_position else {
+            return false;
+        };
+
+        let (travel, delta) = match drag.handle.axis {
+            ScrollbarAxis::Horizontal => (
+                (drag.track.width - drag.thumb.width).max(0.0),
+                cursor_position.x - drag.start_cursor.x,
+            ),
+            ScrollbarAxis::Vertical => (
+                (drag.track.height - drag.thumb.height).max(0.0),
+                cursor_position.y - drag.start_cursor.y,
+            ),
+        };
+
+        let mut next_offset = drag.start_scroll_offset;
+        let axis_offset = if travel <= 0.0 || drag.max_offset <= 0.0 {
+            0.0
+        } else {
+            (delta / travel) * drag.max_offset
+        };
+
+        match drag.handle.axis {
+            ScrollbarAxis::Horizontal => {
+                next_offset.x =
+                    (drag.start_scroll_offset.x + axis_offset).clamp(0.0, drag.max_offset)
+            }
+            ScrollbarAxis::Vertical => {
+                next_offset.y =
+                    (drag.start_scroll_offset.y + axis_offset).clamp(0.0, drag.max_offset)
+            }
+        }
+
+        let previous = self
+            .scroll_states
+            .get(&drag.handle.id)
+            .copied()
+            .unwrap_or(Point::ZERO);
+        if (previous.x - next_offset.x).abs() > 0.01 || (previous.y - next_offset.y).abs() > 0.01 {
+            self.set_scroll_offset(drag.handle.id, next_offset);
+            return true;
+        }
+
+        false
+    }
+
+    fn end_scrollbar_drag(&mut self) -> bool {
+        if self.active_scrollbar_drag.take().is_none() {
+            return false;
+        }
+        self.sync_scrollbar_hover();
+        self.invalidate_scene();
+        true
+    }
+
+    fn update_cursor_icon(&self) {
         if let Some(window) = self.window.as_ref() {
-            let cursor = if self
+            let cursor = if self.active_scrollbar_drag.is_some() {
+                Cursor::Icon(CursorIcon::Pointer)
+            } else if self.hovered_scrollbar.is_some() {
+                Cursor::Icon(CursorIcon::Pointer)
+            } else if self
                 .hovered_widgets
                 .last()
                 .map(|hovered| hovered.prefers_text_cursor)
@@ -1043,6 +1271,17 @@ impl<VM> BoundRuntimeHandler<VM> {
             };
             window.set_cursor(cursor);
         }
+    }
+
+    fn set_scroll_offset(&mut self, widget_id: WidgetId, offset: Point) {
+        if offset.x.abs() <= 0.01 && offset.y.abs() <= 0.01 {
+            self.scroll_states.remove(&widget_id);
+        } else {
+            self.scroll_states.insert(widget_id, offset);
+        }
+        self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
+        self.invalidate_scene();
+        self.invalidation.mark_dirty();
     }
 
     fn update_focus(
@@ -1365,9 +1604,8 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
                     self.invalidation.mark_dirty();
                 }
             }
-            if let Some(window) = self.window.as_ref() {
-                window.set_cursor(Cursor::Icon(CursorIcon::Default));
-            }
+            self.hovered_scrollbar = self.active_scrollbar_drag.map(|drag| drag.handle);
+            self.update_cursor_icon();
         }
 
         if Self::should_dispatch_widget_event(&event) {
@@ -1376,14 +1614,27 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
 
             match &event {
                 WindowEvent::CursorMoved { .. } => {
-                    self.handle_hover(viewport);
+                    if self.active_scrollbar_drag.is_some() {
+                        self.handle_scrollbar_drag();
+                        self.sync_scrollbar_hover();
+                        self.update_cursor_icon();
+                    } else {
+                        self.handle_hover(viewport);
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    self.handle_mouse_wheel(*delta);
                 }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
                     ..
                 } => {
-                    self.handle_mouse_press(viewport, Instant::now());
+                    if !self.begin_scrollbar_drag() {
+                        self.handle_mouse_press(viewport, Instant::now());
+                    } else {
+                        self.update_cursor_icon();
+                    }
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
                     self.handle_input_keyboard_event(event);
@@ -1413,6 +1664,7 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(false) => {
+                self.end_scrollbar_drag();
                 self.update_focus(None, None, None, None);
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
@@ -1427,6 +1679,16 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
             }
             WindowEvent::Ime(ime) => {
                 self.handle_input_ime(ime);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.end_scrollbar_drag();
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
             }
             WindowEvent::Resized(size) => {
                 self.invalidate_scene();
@@ -1478,6 +1740,21 @@ fn normalize_single_line_text(text: &str) -> String {
         })
         .filter(|ch| !ch.is_control() || *ch == ' ')
         .collect()
+}
+
+fn mouse_scroll_delta(delta: MouseScrollDelta) -> Point {
+    const LINE_SCROLL_STEP: f32 = 40.0;
+
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => Point {
+            x: x * LINE_SCROLL_STEP,
+            y: y * LINE_SCROLL_STEP,
+        },
+        MouseScrollDelta::PixelDelta(position) => Point {
+            x: position.x as f32,
+            y: position.y as f32,
+        },
+    }
 }
 
 fn move_cursor(state: &mut InputEditState, next: usize, extend_selection: bool) {

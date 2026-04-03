@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use taffy::prelude::{
     auto, evenly_sized_tracks, length, line, percent, AlignItems as TaffyAlignItems,
     AvailableSpace, Display, FlexDirection, FlexWrap, JustifyContent as TaffyJustifyContent,
@@ -9,13 +11,14 @@ use crate::animation::{AnimationEngine, WidgetProperty};
 use crate::foundation::color::Color;
 use crate::foundation::view_model::{Command, ValueCommand};
 use crate::text::font::{FontManager, TextFontRequest};
-use crate::ui::layout::{Align, Axis, Insets, Justify, LayoutStyle, Value, Wrap};
+use crate::ui::layout::{Align, Axis, Insets, Justify, LayoutStyle, Overflow, Value, Wrap};
 use crate::ui::theme::Theme;
 
 use super::common::{
     ComputedScene, ContainerKind, ContainerLayout, HitInteraction, HitRegion, InputEditState,
     InputSnapshot, InteractionHandlers, LayoutNode, MeasureContext, Point, Rect, RenderPrimitive,
-    RenderedWidgetScene, ScenePrimitives, TextPrimitive, VisualStyle, WidgetId, WidgetKind,
+    RenderedWidgetScene, ScenePrimitives, ScrollRegion, ScrollbarAxis, ScrollbarHandle,
+    TextPrimitive, VisualStyle, WidgetId, WidgetKind,
 };
 use super::text::Text;
 
@@ -35,6 +38,9 @@ struct CollectContext<'a, 'b> {
     focused_input: Option<WidgetId>,
     focused_input_state: Option<&'a InputEditState>,
     caret_visible: bool,
+    hovered_scrollbar: Option<ScrollbarHandle>,
+    active_scrollbar: Option<ScrollbarHandle>,
+    scroll_offsets: &'a HashMap<WidgetId, Point>,
     animations: &'b mut AnimationEngine,
     now: std::time::Instant,
 }
@@ -43,6 +49,7 @@ struct CollectContext<'a, 'b> {
 struct VisualContext {
     origin: Point,
     opacity: f32,
+    clip_rect: Rect,
 }
 
 impl<VM> Element<VM> {
@@ -338,6 +345,7 @@ impl<VM> Element<VM> {
         let background_inset = border_width.min(frame.width * 0.5).min(frame.height * 0.5);
         let background_frame = frame.inset(Insets::all(background_inset));
         let background_radius = (border_radius - background_inset).max(0.0);
+        let primitive_clip = Some(visual_context.clip_rect);
 
         if background.a > 0 && background_frame.width > 0.0 && background_frame.height > 0.0 {
             computed.scene.shapes.push(RenderPrimitive {
@@ -345,6 +353,7 @@ impl<VM> Element<VM> {
                 color: background,
                 corner_radius: background_radius,
                 stroke_width: 0.0,
+                clip_rect: primitive_clip,
             });
         }
 
@@ -354,11 +363,13 @@ impl<VM> Element<VM> {
             border_width,
             border_color,
             border_radius,
+            primitive_clip,
         );
 
         if self.interactions.has_any() {
             computed.hit_regions.push(HitRegion {
                 rect: frame,
+                clip_rect: primitive_clip,
                 interaction: HitInteraction::Widget {
                     id: self.id,
                     interactions: self.interactions.clone(),
@@ -368,21 +379,83 @@ impl<VM> Element<VM> {
         }
 
         match &self.kind {
-            WidgetKind::Container { children, .. } => {
+            WidgetKind::Container { layout, children } => {
+                let content_bounds =
+                    compute_container_content_bounds(self, children, layout_node, frame, context);
+                let max_scroll = Point {
+                    x: (content_bounds.right() - background_frame.right()).max(0.0),
+                    y: (content_bounds.bottom() - background_frame.bottom()).max(0.0),
+                };
+                let requested_scroll = context
+                    .scroll_offsets
+                    .get(&self.id)
+                    .copied()
+                    .unwrap_or(Point::ZERO);
+                let scroll_offset = Point {
+                    x: if layout.overflow_x == Overflow::Scroll {
+                        requested_scroll.x.clamp(0.0, max_scroll.x)
+                    } else {
+                        0.0
+                    },
+                    y: if layout.overflow_y == Overflow::Scroll {
+                        requested_scroll.y.clamp(0.0, max_scroll.y)
+                    } else {
+                        0.0
+                    },
+                };
+                let child_clip_rect = apply_overflow_clip(
+                    visual_context.clip_rect,
+                    background_frame,
+                    layout.overflow_x,
+                    layout.overflow_y,
+                );
+                let scrollbar_geometry = compute_scrollbar_geometry(
+                    background_frame,
+                    content_bounds,
+                    scroll_offset,
+                    layout,
+                );
+                let visible_frame = frame
+                    .intersect(visual_context.clip_rect)
+                    .unwrap_or(Rect::new(frame.x, frame.y, 0.0, 0.0));
+                computed.scroll_regions.push(ScrollRegion {
+                    id: self.id,
+                    content_viewport: background_frame,
+                    visible_frame,
+                    content_bounds,
+                    scroll_offset,
+                    overflow_x: layout.overflow_x,
+                    overflow_y: layout.overflow_y,
+                    horizontal_track: scrollbar_geometry.horizontal_track,
+                    horizontal_thumb: scrollbar_geometry.horizontal_thumb,
+                    vertical_track: scrollbar_geometry.vertical_track,
+                    vertical_thumb: scrollbar_geometry.vertical_thumb,
+                });
                 for (child, child_layout) in children.iter().zip(layout_node.children.iter()) {
                     child.collect_primitives(
                         child_layout,
                         VisualContext {
                             origin: Point {
-                                x: frame.x,
-                                y: frame.y,
+                                x: frame.x - scroll_offset.x,
+                                y: frame.y - scroll_offset.y,
                             },
                             opacity,
+                            clip_rect: child_clip_rect,
                         },
                         context,
                         computed,
                     );
                 }
+                push_scrollbar_primitives(
+                    &mut computed.scene,
+                    child_clip_rect,
+                    opacity,
+                    layout,
+                    scrollbar_geometry,
+                    self.id,
+                    context.hovered_scrollbar,
+                    context.active_scrollbar,
+                );
             }
             WidgetKind::Text { text } => {
                 let padding = text.layout.padding.resolve_widget(
@@ -405,6 +478,7 @@ impl<VM> Element<VM> {
                     context.theme.palette.text,
                     opacity,
                     self.id,
+                    primitive_clip,
                 );
             }
             WidgetKind::Button { label } => {
@@ -428,6 +502,7 @@ impl<VM> Element<VM> {
                     context.theme.palette.text,
                     opacity,
                     self.id,
+                    primitive_clip,
                 );
             }
             WidgetKind::Input {
@@ -458,12 +533,14 @@ impl<VM> Element<VM> {
                     self.id,
                     active.then_some(context.focused_input_state).flatten(),
                     active && context.caret_visible,
+                    primitive_clip,
                 );
                 if active {
                     computed.ime_cursor_area = ime_cursor_area;
                 }
                 computed.hit_regions.push(HitRegion {
                     rect: frame,
+                    clip_rect: primitive_clip,
                     interaction: HitInteraction::FocusInput {
                         id: self.id,
                         interactions: self.interactions.clone(),
@@ -576,6 +653,254 @@ fn apply_container_style(
     }
 }
 
+fn compute_container_content_bounds<VM>(
+    _element: &Element<VM>,
+    children: &[Element<VM>],
+    layout_node: &LayoutNode,
+    frame: Rect,
+    context: &mut CollectContext<'_, '_>,
+) -> Rect {
+    let mut bounds: Option<Rect> = None;
+
+    for (child, child_layout) in children.iter().zip(layout_node.children.iter()) {
+        let child_layout = context
+            .taffy
+            .layout(child_layout.node)
+            .expect("child layout node should exist");
+        let offset = child.visual.offset.resolve_widget(
+            context.animations,
+            child.id,
+            WidgetProperty::Offset,
+            context.now,
+        );
+        let child_frame = Rect::new(
+            frame.x + child_layout.location.x + offset.x,
+            frame.y + child_layout.location.y + offset.y,
+            child_layout.size.width,
+            child_layout.size.height,
+        );
+        bounds = Some(match bounds {
+            Some(existing) => existing.union(child_frame),
+            None => child_frame,
+        });
+    }
+
+    bounds.unwrap_or(Rect::new(frame.x, frame.y, 0.0, 0.0))
+}
+
+fn apply_overflow_clip(
+    parent_clip: Rect,
+    frame: Rect,
+    overflow_x: Overflow,
+    overflow_y: Overflow,
+) -> Rect {
+    let x = if matches!(overflow_x, Overflow::Hidden | Overflow::Scroll) {
+        parent_clip.x.max(frame.x)
+    } else {
+        parent_clip.x
+    };
+    let y = if matches!(overflow_y, Overflow::Hidden | Overflow::Scroll) {
+        parent_clip.y.max(frame.y)
+    } else {
+        parent_clip.y
+    };
+    let right = if matches!(overflow_x, Overflow::Hidden | Overflow::Scroll) {
+        parent_clip.right().min(frame.right())
+    } else {
+        parent_clip.right()
+    };
+    let bottom = if matches!(overflow_y, Overflow::Hidden | Overflow::Scroll) {
+        parent_clip.bottom().min(frame.bottom())
+    } else {
+        parent_clip.bottom()
+    };
+
+    Rect::new(x, y, (right - x).max(0.0), (bottom - y).max(0.0))
+}
+
+#[derive(Clone, Copy, Default)]
+struct ScrollbarGeometry {
+    horizontal_track: Option<Rect>,
+    horizontal_thumb: Option<Rect>,
+    vertical_track: Option<Rect>,
+    vertical_thumb: Option<Rect>,
+}
+
+fn compute_scrollbar_geometry(
+    viewport: Rect,
+    content_bounds: Rect,
+    scroll_offset: Point,
+    layout: &ContainerLayout,
+) -> ScrollbarGeometry {
+    let can_scroll_x =
+        layout.overflow_x == Overflow::Scroll && content_bounds.right() > viewport.right();
+    let can_scroll_y =
+        layout.overflow_y == Overflow::Scroll && content_bounds.bottom() > viewport.bottom();
+    if !can_scroll_x && !can_scroll_y {
+        return ScrollbarGeometry::default();
+    }
+
+    let style = layout.scrollbar_style;
+    let thickness = style.thickness.max(2.0);
+    let inset_bounds = viewport.inset(style.insets);
+    if inset_bounds.is_empty() {
+        return ScrollbarGeometry::default();
+    }
+
+    let vertical_track = can_scroll_y.then(|| {
+        Rect::new(
+            (inset_bounds.right() - thickness).max(inset_bounds.x),
+            inset_bounds.y,
+            thickness.min(inset_bounds.width),
+            (inset_bounds.height - if can_scroll_x { thickness } else { 0.0 }).max(0.0),
+        )
+    });
+    let horizontal_track = can_scroll_x.then(|| {
+        Rect::new(
+            inset_bounds.x,
+            (inset_bounds.bottom() - thickness).max(inset_bounds.y),
+            (inset_bounds.width - if can_scroll_y { thickness } else { 0.0 }).max(0.0),
+            thickness.min(inset_bounds.height),
+        )
+    });
+
+    ScrollbarGeometry {
+        horizontal_thumb: horizontal_track
+            .filter(|track| !track.is_empty())
+            .map(|track| {
+                scrollbar_thumb_rect(
+                    track,
+                    viewport.width,
+                    scroll_offset.x,
+                    (content_bounds.right() - viewport.x).max(viewport.width),
+                    style.min_thumb_length.max(thickness),
+                    Axis::Horizontal,
+                )
+            }),
+        vertical_thumb: vertical_track
+            .filter(|track| !track.is_empty())
+            .map(|track| {
+                scrollbar_thumb_rect(
+                    track,
+                    viewport.height,
+                    scroll_offset.y,
+                    (content_bounds.bottom() - viewport.y).max(viewport.height),
+                    style.min_thumb_length.max(thickness),
+                    Axis::Vertical,
+                )
+            }),
+        horizontal_track: horizontal_track.filter(|track| !track.is_empty()),
+        vertical_track: vertical_track.filter(|track| !track.is_empty()),
+    }
+}
+
+fn push_scrollbar_primitives(
+    scene: &mut ScenePrimitives,
+    clip_rect: Rect,
+    opacity: f32,
+    layout: &ContainerLayout,
+    geometry: ScrollbarGeometry,
+    widget_id: WidgetId,
+    hovered_scrollbar: Option<ScrollbarHandle>,
+    active_scrollbar: Option<ScrollbarHandle>,
+) {
+    if geometry.horizontal_track.is_none() && geometry.vertical_track.is_none() {
+        return;
+    }
+
+    let style = layout.scrollbar_style;
+    let track_clip = Some(clip_rect);
+    let track_color = style.track_color.with_alpha_factor(opacity);
+    let thumb_color_for = |axis| {
+        let handle = ScrollbarHandle {
+            id: widget_id,
+            axis,
+        };
+        if active_scrollbar == Some(handle) {
+            style.active_thumb_color.with_alpha_factor(opacity)
+        } else if hovered_scrollbar == Some(handle) {
+            style.hover_thumb_color.with_alpha_factor(opacity)
+        } else {
+            style.thumb_color.with_alpha_factor(opacity)
+        }
+    };
+    let thickness = style.thickness.max(2.0);
+    let radius = style.radius.max(0.0).min(thickness * 0.5);
+
+    if let Some(track) = geometry.vertical_track {
+        scene.overlay_shapes.push(RenderPrimitive {
+            rect: track,
+            color: track_color,
+            corner_radius: radius,
+            stroke_width: 0.0,
+            clip_rect: track_clip,
+        });
+        let thumb = geometry
+            .vertical_thumb
+            .expect("vertical thumb should exist with vertical track");
+        scene.overlay_shapes.push(RenderPrimitive {
+            rect: thumb,
+            color: thumb_color_for(ScrollbarAxis::Vertical),
+            corner_radius: radius,
+            stroke_width: 0.0,
+            clip_rect: track_clip,
+        });
+    }
+
+    if let Some(track) = geometry.horizontal_track {
+        scene.overlay_shapes.push(RenderPrimitive {
+            rect: track,
+            color: track_color,
+            corner_radius: radius,
+            stroke_width: 0.0,
+            clip_rect: track_clip,
+        });
+        let thumb = geometry
+            .horizontal_thumb
+            .expect("horizontal thumb should exist with horizontal track");
+        scene.overlay_shapes.push(RenderPrimitive {
+            rect: thumb,
+            color: thumb_color_for(ScrollbarAxis::Horizontal),
+            corner_radius: radius,
+            stroke_width: 0.0,
+            clip_rect: track_clip,
+        });
+    }
+}
+
+fn scrollbar_thumb_rect(
+    track: Rect,
+    viewport_extent: f32,
+    scroll_offset: f32,
+    content_extent: f32,
+    min_thumb_length: f32,
+    axis: Axis,
+) -> Rect {
+    let track_extent = match axis {
+        Axis::Horizontal => track.width,
+        Axis::Vertical => track.height,
+    }
+    .max(0.0);
+    let max_offset = (content_extent - viewport_extent).max(0.0);
+    let mut thumb_extent = if content_extent <= 0.0 {
+        track_extent
+    } else {
+        track_extent * (viewport_extent / content_extent)
+    };
+    thumb_extent = thumb_extent.clamp(min_thumb_length.min(track_extent), track_extent);
+    let travel = (track_extent - thumb_extent).max(0.0);
+    let thumb_offset = if max_offset <= 0.0 || travel <= 0.0 {
+        0.0
+    } else {
+        (scroll_offset.clamp(0.0, max_offset) / max_offset) * travel
+    };
+
+    match axis {
+        Axis::Horizontal => Rect::new(track.x + thumb_offset, track.y, thumb_extent, track.height),
+        Axis::Vertical => Rect::new(track.x, track.y + thumb_offset, track.width, thumb_extent),
+    }
+}
+
 fn map_align_items(align: Align) -> Option<TaffyAlignItems> {
     Some(match align {
         Align::Start => TaffyAlignItems::Start,
@@ -681,6 +1006,7 @@ fn push_text_primitives(
     fallback_color: Color,
     opacity: f32,
     widget_id: WidgetId,
+    clip_rect: Option<Rect>,
 ) {
     let content = text.content.resolve();
     let text_request = TextFontRequest {
@@ -720,6 +1046,7 @@ fn push_text_primitives(
         font_weight: text.font_weight,
         line_height,
         letter_spacing: text.letter_spacing,
+        clip_rect,
     });
 
     if show_caret {
@@ -746,6 +1073,7 @@ fn push_text_primitives(
             color: theme.palette.text.with_alpha_factor(opacity),
             corner_radius: 0.0,
             stroke_width: 0.0,
+            clip_rect,
         });
     }
 }
@@ -765,6 +1093,7 @@ fn push_input_primitives(
     widget_id: WidgetId,
     edit_state: Option<&InputEditState>,
     show_caret: bool,
+    clip_rect: Option<Rect>,
 ) -> Option<Rect> {
     let font_size = text
         .font_size
@@ -834,6 +1163,7 @@ fn push_input_primitives(
             font_weight: placeholder.font_weight,
             line_height: placeholder_line_height,
             letter_spacing: placeholder.letter_spacing,
+            clip_rect,
         });
 
         let caret_rect = Rect::new(
@@ -848,6 +1178,7 @@ fn push_input_primitives(
                 color: theme.palette.text.with_alpha_factor(opacity),
                 corner_radius: 0.0,
                 stroke_width: 0.0,
+                clip_rect,
             });
         }
 
@@ -946,6 +1277,7 @@ fn push_input_primitives(
                     color: theme.palette.accent.with_alpha_factor(0.35 * opacity),
                     corner_radius: 4.0,
                     stroke_width: 0.0,
+                    clip_rect,
                 });
             }
         }
@@ -967,6 +1299,7 @@ fn push_input_primitives(
             font_weight: text.font_weight,
             line_height,
             letter_spacing: text.letter_spacing,
+            clip_rect,
         });
         cursor_x += prefix_width;
     }
@@ -986,6 +1319,7 @@ fn push_input_primitives(
             font_weight: text.font_weight,
             line_height,
             letter_spacing: text.letter_spacing,
+            clip_rect,
         });
         scene.overlay_shapes.push(RenderPrimitive {
             rect: Rect::new(
@@ -997,6 +1331,7 @@ fn push_input_primitives(
             color: preedit_color,
             corner_radius: 0.0,
             stroke_width: 0.0,
+            clip_rect,
         });
         cursor_x += preedit_width;
     }
@@ -1024,6 +1359,7 @@ fn push_input_primitives(
             font_weight: text.font_weight,
             line_height,
             letter_spacing: text.letter_spacing,
+            clip_rect,
         });
     }
 
@@ -1076,6 +1412,7 @@ fn push_input_primitives(
             color: theme.palette.text.with_alpha_factor(opacity),
             corner_radius: 0.0,
             stroke_width: 0.0,
+            clip_rect,
         });
     }
 
@@ -1133,6 +1470,7 @@ fn push_border_primitives(
     border_width: f32,
     border_color: Color,
     border_radius: f32,
+    clip_rect: Option<Rect>,
 ) {
     if border_color.a == 0 {
         return;
@@ -1151,6 +1489,7 @@ fn push_border_primitives(
         color: border_color,
         corner_radius: border_radius,
         stroke_width: thickness,
+        clip_rect,
     });
 }
 
@@ -1168,6 +1507,9 @@ impl<VM> WidgetTree<VM> {
         font_manager: &FontManager,
         theme: &Theme,
         animations: &mut AnimationEngine,
+        hovered_scrollbar: Option<ScrollbarHandle>,
+        active_scrollbar: Option<ScrollbarHandle>,
+        scroll_offsets: &HashMap<WidgetId, Point>,
         viewport: Rect,
         focused_input: Option<WidgetId>,
         focused_input_state: Option<&InputEditState>,
@@ -1200,6 +1542,9 @@ impl<VM> WidgetTree<VM> {
             focused_input,
             focused_input_state,
             caret_visible,
+            hovered_scrollbar,
+            active_scrollbar,
+            scroll_offsets,
             animations,
             now,
         };
@@ -1211,6 +1556,7 @@ impl<VM> WidgetTree<VM> {
                     y: viewport.y,
                 },
                 opacity: 1.0,
+                clip_rect: viewport,
             },
             &mut context,
             &mut computed,
@@ -1223,6 +1569,9 @@ impl<VM> WidgetTree<VM> {
         font_manager: &FontManager,
         theme: &Theme,
         animations: &mut AnimationEngine,
+        hovered_scrollbar: Option<ScrollbarHandle>,
+        active_scrollbar: Option<ScrollbarHandle>,
+        scroll_offsets: &HashMap<WidgetId, Point>,
         viewport: Rect,
         focused_input: Option<WidgetId>,
         focused_input_state: Option<&InputEditState>,
@@ -1232,6 +1581,9 @@ impl<VM> WidgetTree<VM> {
             font_manager,
             theme,
             animations,
+            hovered_scrollbar,
+            active_scrollbar,
+            scroll_offsets,
             viewport,
             focused_input,
             focused_input_state,
@@ -1239,6 +1591,7 @@ impl<VM> WidgetTree<VM> {
         );
         RenderedWidgetScene {
             primitives: computed.scene,
+            scroll_regions: computed.scroll_regions,
             ime_cursor_area: computed.ime_cursor_area,
         }
     }
@@ -1250,11 +1603,13 @@ impl<VM> WidgetTree<VM> {
         let mut path = Vec::new();
         let mut ids = Vec::new();
 
-        for hit in computed
-            .hit_regions
-            .iter()
-            .filter(|hit| hit.rect.contains(point))
-        {
+        for hit in computed.hit_regions.iter().filter(|hit| {
+            hit.rect.contains(point)
+                && hit
+                    .clip_rect
+                    .map(|clip_rect| clip_rect.contains(point))
+                    .unwrap_or(true)
+        }) {
             let id = match &hit.interaction {
                 HitInteraction::Widget { id, .. } | HitInteraction::FocusInput { id, .. } => *id,
             };
@@ -1275,6 +1630,9 @@ impl<VM> WidgetTree<VM> {
         font_manager: &FontManager,
         theme: &Theme,
         animations: &mut AnimationEngine,
+        hovered_scrollbar: Option<ScrollbarHandle>,
+        active_scrollbar: Option<ScrollbarHandle>,
+        scroll_offsets: &HashMap<WidgetId, Point>,
         viewport: Rect,
         cursor_position: Option<Point>,
         focused_input: Option<WidgetId>,
@@ -1283,6 +1641,9 @@ impl<VM> WidgetTree<VM> {
             font_manager,
             theme,
             animations,
+            hovered_scrollbar,
+            active_scrollbar,
+            scroll_offsets,
             viewport,
             cursor_position,
             focused_input,
@@ -1295,6 +1656,9 @@ impl<VM> WidgetTree<VM> {
         font_manager: &FontManager,
         theme: &Theme,
         animations: &mut AnimationEngine,
+        hovered_scrollbar: Option<ScrollbarHandle>,
+        active_scrollbar: Option<ScrollbarHandle>,
+        scroll_offsets: &HashMap<WidgetId, Point>,
         viewport: Rect,
         cursor_position: Option<Point>,
         focused_input: Option<WidgetId>,
@@ -1306,6 +1670,9 @@ impl<VM> WidgetTree<VM> {
             font_manager,
             theme,
             animations,
+            hovered_scrollbar,
+            active_scrollbar,
+            scroll_offsets,
             viewport,
             focused_input,
             None,
@@ -1322,7 +1689,15 @@ impl<VM> WidgetTree<VM> {
 #[cfg(test)]
 mod tests {
     use super::centered_text_frame;
+    use std::collections::HashMap;
+
+    use crate::animation::AnimationEngine;
+    use crate::foundation::view_model::Command;
+    use crate::text::font::{FontCatalog, FontManager};
+    use crate::ui::layout::Overflow;
+    use crate::ui::theme::Theme;
     use crate::ui::widget::common::Rect;
+    use crate::ui::widget::{Point, ScrollbarAxis, ScrollbarHandle, Stack, WidgetTree};
 
     #[test]
     fn centers_text_using_actual_render_height() {
@@ -1333,6 +1708,233 @@ mod tests {
         assert_eq!(frame.y, 11.0);
         assert_eq!(frame.width, 56.0);
         assert_eq!(frame.height, 18.0);
+    }
+
+    #[test]
+    fn clipped_children_keep_clip_rect_and_do_not_hit_outside_parent() {
+        let theme = Theme::default();
+        let font_manager = FontManager::new(&FontCatalog::default());
+        let mut animations = AnimationEngine::default();
+        let tree = WidgetTree::new(
+            Stack::new().child(
+                Stack::new()
+                    .size(100.0, 100.0)
+                    .background(crate::foundation::color::Color::hexa(0x1E293BFF))
+                    .child(
+                        Stack::new()
+                            .size(80.0, 80.0)
+                            .offset(Point { x: 60.0, y: 0.0 })
+                            .background(crate::foundation::color::Color::hexa(0x38BDF8FF))
+                            .on_click(Command::new(|_: &mut ()| {})),
+                    ),
+            ),
+        );
+
+        let rendered = tree.render_output(
+            &font_manager,
+            &theme,
+            &mut animations,
+            None,
+            None,
+            &HashMap::new(),
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(
+            rendered
+                .primitives
+                .shapes
+                .last()
+                .and_then(|primitive| primitive.clip_rect),
+            Some(Rect::new(0.0, 0.0, 100.0, 100.0))
+        );
+
+        let hit = tree.hit_test(
+            &font_manager,
+            &theme,
+            &mut animations,
+            None,
+            None,
+            &HashMap::new(),
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            Some(Point { x: 120.0, y: 20.0 }),
+            None,
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn scroll_offsets_are_clamped_to_content_bounds() {
+        let theme = Theme::default();
+        let font_manager = FontManager::new(&FontCatalog::default());
+        let mut animations = AnimationEngine::default();
+        let scroller: super::Element<()> = Stack::new()
+            .size(100.0, 100.0)
+            .border(4.0, crate::foundation::color::Color::WHITE)
+            .overflow_y(Overflow::Scroll)
+            .background(crate::foundation::color::Color::hexa(0x111827FF))
+            .child(
+                Stack::new()
+                    .size(100.0, 300.0)
+                    .background(crate::foundation::color::Color::hexa(0x22C55EFF)),
+            )
+            .into();
+        let scroller_id = scroller.id;
+        let tree = WidgetTree::new(Stack::new().child(scroller));
+
+        let mut scroll_offsets = HashMap::new();
+        scroll_offsets.insert(scroller_id, Point { x: 0.0, y: 500.0 });
+        let rendered = tree.render_output(
+            &font_manager,
+            &theme,
+            &mut animations,
+            None,
+            None,
+            &scroll_offsets,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            None,
+            None,
+            false,
+        );
+
+        let region = rendered
+            .scroll_regions
+            .into_iter()
+            .find(|region| region.id == scroller_id)
+            .expect("scroll region should exist");
+        assert_eq!(region.content_viewport, Rect::new(4.0, 4.0, 92.0, 92.0));
+        assert_eq!(region.scroll_offset.y, 204.0);
+        assert_eq!(region.max_offset().y, 204.0);
+    }
+
+    #[test]
+    fn overflow_clips_children_to_inside_of_border() {
+        let theme = Theme::default();
+        let font_manager = FontManager::new(&FontCatalog::default());
+        let mut animations = AnimationEngine::default();
+        let tree = WidgetTree::new(
+            Stack::<()>::new()
+                .size(100.0, 100.0)
+                .border(4.0, crate::foundation::color::Color::WHITE)
+                .overflow(Overflow::Hidden)
+                .child(
+                    Stack::new()
+                        .size(100.0, 100.0)
+                        .background(crate::foundation::color::Color::BLACK),
+                ),
+        );
+
+        let rendered = tree.render_output(
+            &font_manager,
+            &theme,
+            &mut animations,
+            None,
+            None,
+            &HashMap::new(),
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            None,
+            None,
+            false,
+        );
+
+        let child_shape = rendered
+            .primitives
+            .shapes
+            .iter()
+            .find(|primitive| primitive.color == crate::foundation::color::Color::BLACK)
+            .expect("child shape should exist");
+        assert_eq!(child_shape.clip_rect, Some(Rect::new(4.0, 4.0, 92.0, 92.0)));
+    }
+
+    #[test]
+    fn scroll_containers_render_scrollbar_track_and_thumb() {
+        let theme = Theme::default();
+        let font_manager = FontManager::new(&FontCatalog::default());
+        let mut animations = AnimationEngine::default();
+        let scroller: super::Element<()> = Stack::new()
+            .size(120.0, 120.0)
+            .overflow_y(Overflow::Scroll)
+            .scrollbar_thumb_color(crate::foundation::color::Color::BLACK)
+            .scrollbar_track_color(crate::foundation::color::Color::WHITE)
+            .scrollbar_hover_thumb_color(crate::foundation::color::Color::hexa(0x112233FF))
+            .scrollbar_active_thumb_color(crate::foundation::color::Color::hexa(0x445566FF))
+            .child(
+                Stack::new()
+                    .size(120.0, 260.0)
+                    .background(crate::foundation::color::Color::hexa(0x1D4ED8FF)),
+            )
+            .into();
+        let scroller_id = scroller.id;
+        let tree = WidgetTree::new(scroller);
+
+        let rendered = tree.render_output(
+            &font_manager,
+            &theme,
+            &mut animations,
+            None,
+            None,
+            &HashMap::new(),
+            Rect::new(0.0, 0.0, 120.0, 120.0),
+            None,
+            None,
+            false,
+        );
+
+        let overlay_shapes = rendered.primitives.overlay_shapes;
+        assert!(overlay_shapes
+            .iter()
+            .any(|primitive| primitive.color == crate::foundation::color::Color::WHITE));
+        assert!(overlay_shapes
+            .iter()
+            .any(|primitive| primitive.color == crate::foundation::color::Color::BLACK));
+
+        let hovered = tree.render_output(
+            &font_manager,
+            &theme,
+            &mut animations,
+            Some(ScrollbarHandle {
+                id: scroller_id,
+                axis: ScrollbarAxis::Vertical,
+            }),
+            None,
+            &HashMap::new(),
+            Rect::new(0.0, 0.0, 120.0, 120.0),
+            None,
+            None,
+            false,
+        );
+        assert!(hovered
+            .primitives
+            .overlay_shapes
+            .iter()
+            .any(|primitive| primitive.color == crate::foundation::color::Color::hexa(0x112233FF)));
+
+        let active = tree.render_output(
+            &font_manager,
+            &theme,
+            &mut animations,
+            Some(ScrollbarHandle {
+                id: scroller_id,
+                axis: ScrollbarAxis::Vertical,
+            }),
+            Some(ScrollbarHandle {
+                id: scroller_id,
+                axis: ScrollbarAxis::Vertical,
+            }),
+            &HashMap::new(),
+            Rect::new(0.0, 0.0, 120.0, 120.0),
+            None,
+            None,
+            false,
+        );
+        assert!(active
+            .primitives
+            .overlay_shapes
+            .iter()
+            .any(|primitive| primitive.color == crate::foundation::color::Color::hexa(0x445566FF)));
     }
 }
 

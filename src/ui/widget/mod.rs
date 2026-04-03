@@ -8,6 +8,7 @@ mod text;
 pub use button::Button;
 pub(crate) use common::{
     CompositionState, HitInteraction, InputEditState, InputSnapshot, RenderedWidgetScene,
+    ScrollbarAxis, ScrollbarHandle,
 };
 pub use common::{Point, Rect, RenderPrimitive, ScenePrimitives, TextPrimitive, WidgetId};
 pub use container::{Column, Container, Flex, Grid, Row, Stack};

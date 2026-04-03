@@ -9,7 +9,7 @@ use winit::window::Window;
 use crate::foundation::color::Color as TguiColor;
 use crate::foundation::error::TguiError;
 use crate::text::font::{FontCatalog, FontWeight};
-use crate::ui::widget::{RenderPrimitive, ScenePrimitives, TextPrimitive};
+use crate::ui::widget::{Rect, RenderPrimitive, ScenePrimitives, TextPrimitive};
 
 pub enum RenderStatus {
     Rendered,
@@ -41,6 +41,7 @@ struct TextSystem {
 struct TextSprite {
     bind_group: wgpu::BindGroup,
     vertices: [TextVertex; 6],
+    clip_rect: Option<Rect>,
 }
 
 struct TextCacheEntry {
@@ -302,31 +303,6 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let rect_vertices = RectVertex::from_primitives(
-            &scene.shapes,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
-        let overlay_rect_vertices = RectVertex::from_primitives(
-            &scene.overlay_shapes,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
-        let rect_vertex_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tgui-rect-vertices"),
-                    contents: bytemuck::cast_slice(&rect_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-        let overlay_rect_vertex_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tgui-overlay-rect-vertices"),
-                    contents: bytemuck::cast_slice(&overlay_rect_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
         let text_sprites = scene
             .texts
             .iter()
@@ -341,6 +317,7 @@ impl Renderer {
                                 self.config.width as f32,
                                 self.config.height as f32,
                             ),
+                            clip_rect: text.clip_rect,
                         })
                     })
             })
@@ -370,15 +347,15 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            if !rect_vertices.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, rect_vertex_buffer.slice(..));
-                pass.draw(0..rect_vertices.len() as u32, 0..1);
-            }
+            pass.set_pipeline(&self.rect_pipeline);
+            self.draw_rect_primitives(&mut pass, &scene.shapes);
 
             if !text_sprites.is_empty() {
                 pass.set_pipeline(&self.text_pipeline);
                 for sprite in &text_sprites {
+                    if !self.apply_scissor(&mut pass, sprite.clip_rect) {
+                        continue;
+                    }
                     let vertex_buffer =
                         self.device
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -392,11 +369,8 @@ impl Renderer {
                 }
             }
 
-            if !overlay_rect_vertices.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, overlay_rect_vertex_buffer.slice(..));
-                pass.draw(0..overlay_rect_vertices.len() as u32, 0..1);
-            }
+            pass.set_pipeline(&self.rect_pipeline);
+            self.draw_rect_primitives(&mut pass, &scene.overlay_shapes);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -404,6 +378,72 @@ impl Renderer {
         frame.present();
 
         Ok(RenderStatus::Rendered)
+    }
+
+    fn draw_rect_primitives<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        primitives: &[RenderPrimitive],
+    ) {
+        for primitive in primitives {
+            if primitive.rect.width <= 0.0 || primitive.rect.height <= 0.0 {
+                continue;
+            }
+            if !self.apply_scissor(pass, primitive.clip_rect) {
+                continue;
+            }
+
+            let vertices = RectVertex::from_primitive(
+                *primitive,
+                self.config.width as f32,
+                self.config.height as f32,
+            );
+            let vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tgui-rect-vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+    }
+
+    fn apply_scissor<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        clip_rect: Option<Rect>,
+    ) -> bool {
+        let Some((x, y, width, height)) = self.scissor_rect(clip_rect) else {
+            return false;
+        };
+        pass.set_scissor_rect(x, y, width, height);
+        true
+    }
+
+    fn scissor_rect(&self, clip_rect: Option<Rect>) -> Option<(u32, u32, u32, u32)> {
+        let clip_rect = clip_rect.unwrap_or(Rect::new(
+            0.0,
+            0.0,
+            self.config.width as f32,
+            self.config.height as f32,
+        ));
+        let x = clip_rect.x.max(0.0).floor() as u32;
+        let y = clip_rect.y.max(0.0).floor() as u32;
+        let right = clip_rect
+            .right()
+            .min(self.config.width as f32)
+            .ceil()
+            .max(x as f32) as u32;
+        let bottom = clip_rect
+            .bottom()
+            .min(self.config.height as f32)
+            .ceil()
+            .max(y as f32) as u32;
+        let width = right.saturating_sub(x);
+        let height = bottom.saturating_sub(y);
+        (width > 0 && height > 0).then_some((x, y, width, height))
     }
 
     pub fn set_clear_color(&mut self, clear_color: TguiColor) {
@@ -687,88 +727,82 @@ impl RectVertex {
         }
     }
 
-    fn from_primitives(primitives: &[RenderPrimitive], width: f32, height: f32) -> Vec<Self> {
-        let mut vertices = Vec::with_capacity(primitives.len() * 6);
+    fn from_primitive(primitive: RenderPrimitive, width: f32, height: f32) -> [Self; 6] {
+        let x0 = primitive.rect.x / width * 2.0 - 1.0;
+        let x1 = (primitive.rect.x + primitive.rect.width) / width * 2.0 - 1.0;
+        let y0 = 1.0 - primitive.rect.y / height * 2.0;
+        let y1 = 1.0 - (primitive.rect.y + primitive.rect.height) / height * 2.0;
+        let color = [
+            primitive.color.r as f32 / 255.0,
+            primitive.color.g as f32 / 255.0,
+            primitive.color.b as f32 / 255.0,
+            primitive.color.a as f32 / 255.0,
+        ];
+        let rect_size = [
+            primitive.rect.width.max(0.0),
+            primitive.rect.height.max(0.0),
+        ];
+        let radius = primitive
+            .corner_radius
+            .max(0.0)
+            .min(rect_size[0] * 0.5)
+            .min(rect_size[1] * 0.5);
+        let stroke_width = primitive
+            .stroke_width
+            .max(0.0)
+            .min(rect_size[0] * 0.5)
+            .min(rect_size[1] * 0.5);
 
-        for primitive in primitives {
-            let x0 = primitive.rect.x / width * 2.0 - 1.0;
-            let x1 = (primitive.rect.x + primitive.rect.width) / width * 2.0 - 1.0;
-            let y0 = 1.0 - primitive.rect.y / height * 2.0;
-            let y1 = 1.0 - (primitive.rect.y + primitive.rect.height) / height * 2.0;
-            let color = [
-                primitive.color.r as f32 / 255.0,
-                primitive.color.g as f32 / 255.0,
-                primitive.color.b as f32 / 255.0,
-                primitive.color.a as f32 / 255.0,
-            ];
-            let rect_size = [
-                primitive.rect.width.max(0.0),
-                primitive.rect.height.max(0.0),
-            ];
-            let radius = primitive
-                .corner_radius
-                .max(0.0)
-                .min(rect_size[0] * 0.5)
-                .min(rect_size[1] * 0.5);
-            let stroke_width = primitive
-                .stroke_width
-                .max(0.0)
-                .min(rect_size[0] * 0.5)
-                .min(rect_size[1] * 0.5);
-
-            vertices.extend_from_slice(&[
-                Self {
-                    position: [x0, y0],
-                    color,
-                    local_position: [0.0, 0.0],
-                    rect_size,
-                    corner_radius: radius,
-                    stroke_width,
-                },
-                Self {
-                    position: [x1, y0],
-                    color,
-                    local_position: [rect_size[0], 0.0],
-                    rect_size,
-                    corner_radius: radius,
-                    stroke_width,
-                },
-                Self {
-                    position: [x1, y1],
-                    color,
-                    local_position: [rect_size[0], rect_size[1]],
-                    rect_size,
-                    corner_radius: radius,
-                    stroke_width,
-                },
-                Self {
-                    position: [x0, y0],
-                    color,
-                    local_position: [0.0, 0.0],
-                    rect_size,
-                    corner_radius: radius,
-                    stroke_width,
-                },
-                Self {
-                    position: [x1, y1],
-                    color,
-                    local_position: [rect_size[0], rect_size[1]],
-                    rect_size,
-                    corner_radius: radius,
-                    stroke_width,
-                },
-                Self {
-                    position: [x0, y1],
-                    color,
-                    local_position: [0.0, rect_size[1]],
-                    rect_size,
-                    corner_radius: radius,
-                    stroke_width,
-                },
-            ]);
-        }
-
-        vertices
+        [
+            Self {
+                position: [x0, y0],
+                color,
+                local_position: [0.0, 0.0],
+                rect_size,
+                corner_radius: radius,
+                stroke_width,
+            },
+            Self {
+                position: [x1, y0],
+                color,
+                local_position: [rect_size[0], 0.0],
+                rect_size,
+                corner_radius: radius,
+                stroke_width,
+            },
+            Self {
+                position: [x1, y1],
+                color,
+                local_position: [rect_size[0], rect_size[1]],
+                rect_size,
+                corner_radius: radius,
+                stroke_width,
+            },
+            Self {
+                position: [x0, y0],
+                color,
+                local_position: [0.0, 0.0],
+                rect_size,
+                corner_radius: radius,
+                stroke_width,
+            },
+            Self {
+                position: [x1, y1],
+                color,
+                local_position: [rect_size[0], rect_size[1]],
+                rect_size,
+                corner_radius: radius,
+                stroke_width,
+            },
+            Self {
+                position: [x0, y1],
+                color,
+                local_position: [0.0, rect_size[1]],
+                rect_size,
+                corner_radius: radius,
+                stroke_width,
+            },
+        ]
     }
 }
 

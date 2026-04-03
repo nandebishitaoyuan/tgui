@@ -25,7 +25,9 @@ pub use foundation::error::TguiError;
 pub use foundation::event::InputTrigger;
 pub use foundation::view_model::{Command, ValueCommand, ViewModel};
 pub use text::font::FontWeight;
-pub use ui::layout::{Align, Axis, Insets, Justify, LayoutStyle, Value, Wrap};
+pub use ui::layout::{
+    Align, Axis, Insets, Justify, LayoutStyle, Overflow, ScrollbarStyle, Value, Wrap,
+};
 pub use ui::theme::{Theme, ThemeMode};
 pub use ui::widget::{
     rect, Button, Column, Container, Element, Flex, Grid, Input, Point, Rect, Row, Stack, Text,

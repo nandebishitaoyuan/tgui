@@ -1,6 +1,8 @@
 use crate::foundation::color::Color;
 use crate::foundation::view_model::{Command, ValueCommand};
-use crate::ui::layout::{Align, Axis, Insets, Justify, LayoutStyle, Value, Wrap};
+use crate::ui::layout::{
+    Align, Axis, Insets, Justify, LayoutStyle, Overflow, ScrollbarStyle, Value, Wrap,
+};
 
 use super::common::{
     ContainerKind, ContainerLayout, InteractionHandlers, Point, VisualStyle, WidgetId, WidgetKind,
@@ -168,6 +170,91 @@ impl<VM> Container<VM> {
         }
         self
     }
+
+    pub fn overflow(mut self, overflow: Overflow) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.overflow_x = overflow;
+            layout.overflow_y = overflow;
+        }
+        self
+    }
+
+    pub fn overflow_x(mut self, overflow: Overflow) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.overflow_x = overflow;
+        }
+        self
+    }
+
+    pub fn overflow_y(mut self, overflow: Overflow) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.overflow_y = overflow;
+        }
+        self
+    }
+
+    pub fn scrollbar_style(mut self, style: ScrollbarStyle) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style = style;
+        }
+        self
+    }
+
+    pub fn scrollbar_thumb_color(mut self, color: Color) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.thumb_color = color;
+        }
+        self
+    }
+
+    pub fn scrollbar_track_color(mut self, color: Color) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.track_color = color;
+        }
+        self
+    }
+
+    pub fn scrollbar_hover_thumb_color(mut self, color: Color) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.hover_thumb_color = color;
+        }
+        self
+    }
+
+    pub fn scrollbar_active_thumb_color(mut self, color: Color) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.active_thumb_color = color;
+        }
+        self
+    }
+
+    pub fn scrollbar_thickness(mut self, thickness: f32) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.thickness = thickness;
+        }
+        self
+    }
+
+    pub fn scrollbar_radius(mut self, radius: f32) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.radius = radius;
+        }
+        self
+    }
+
+    pub fn scrollbar_insets(mut self, insets: Insets) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.insets = insets;
+        }
+        self
+    }
+
+    pub fn scrollbar_min_thumb_length(mut self, min_thumb_length: f32) -> Self {
+        if let WidgetKind::Container { layout, .. } = &mut self.element.kind {
+            layout.scrollbar_style.min_thumb_length = min_thumb_length;
+        }
+        self
+    }
 }
 
 impl<VM> Default for Container<VM> {
@@ -324,6 +411,54 @@ macro_rules! impl_layout_container {
             pub fn align_y(self, align: Align) -> Self {
                 Self(self.0.align_y(align))
             }
+
+            pub fn overflow(self, overflow: Overflow) -> Self {
+                Self(self.0.overflow(overflow))
+            }
+
+            pub fn overflow_x(self, overflow: Overflow) -> Self {
+                Self(self.0.overflow_x(overflow))
+            }
+
+            pub fn overflow_y(self, overflow: Overflow) -> Self {
+                Self(self.0.overflow_y(overflow))
+            }
+
+            pub fn scrollbar_style(self, style: ScrollbarStyle) -> Self {
+                Self(self.0.scrollbar_style(style))
+            }
+
+            pub fn scrollbar_thumb_color(self, color: Color) -> Self {
+                Self(self.0.scrollbar_thumb_color(color))
+            }
+
+            pub fn scrollbar_track_color(self, color: Color) -> Self {
+                Self(self.0.scrollbar_track_color(color))
+            }
+
+            pub fn scrollbar_hover_thumb_color(self, color: Color) -> Self {
+                Self(self.0.scrollbar_hover_thumb_color(color))
+            }
+
+            pub fn scrollbar_active_thumb_color(self, color: Color) -> Self {
+                Self(self.0.scrollbar_active_thumb_color(color))
+            }
+
+            pub fn scrollbar_thickness(self, thickness: f32) -> Self {
+                Self(self.0.scrollbar_thickness(thickness))
+            }
+
+            pub fn scrollbar_radius(self, radius: f32) -> Self {
+                Self(self.0.scrollbar_radius(radius))
+            }
+
+            pub fn scrollbar_insets(self, insets: Insets) -> Self {
+                Self(self.0.scrollbar_insets(insets))
+            }
+
+            pub fn scrollbar_min_thumb_length(self, min_thumb_length: f32) -> Self {
+                Self(self.0.scrollbar_min_thumb_length(min_thumb_length))
+            }
         }
 
         impl<VM> From<$name<VM>> for Element<VM> {
@@ -417,3 +552,80 @@ impl_layout_container!(Row);
 impl_layout_container!(Column);
 impl_layout_container!(Grid);
 impl_layout_container!(Flex);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn container_overflow_defaults_to_hidden() {
+        let container = Container::<()>::new();
+        let WidgetKind::Container { layout, .. } = &container.element.kind else {
+            panic!("expected container widget");
+        };
+
+        assert_eq!(layout.overflow_x, Overflow::Hidden);
+        assert_eq!(layout.overflow_y, Overflow::Hidden);
+    }
+
+    #[test]
+    fn overflow_helpers_update_expected_axes() {
+        let container = Container::<()>::new()
+            .overflow_x(Overflow::Scroll)
+            .overflow_y(Overflow::Visible)
+            .overflow(Overflow::Hidden);
+        let WidgetKind::Container { layout, .. } = &container.element.kind else {
+            panic!("expected container widget");
+        };
+
+        assert_eq!(layout.overflow_x, Overflow::Hidden);
+        assert_eq!(layout.overflow_y, Overflow::Hidden);
+
+        let container = Container::<()>::new()
+            .overflow_x(Overflow::Scroll)
+            .overflow_y(Overflow::Visible);
+        let WidgetKind::Container { layout, .. } = &container.element.kind else {
+            panic!("expected container widget");
+        };
+
+        assert_eq!(layout.overflow_x, Overflow::Scroll);
+        assert_eq!(layout.overflow_y, Overflow::Visible);
+    }
+
+    #[test]
+    fn scrollbar_style_helpers_update_layout_style() {
+        let container = Container::<()>::new()
+            .scrollbar_thickness(14.0)
+            .scrollbar_radius(6.0)
+            .scrollbar_insets(Insets::symmetric(3.0, 5.0))
+            .scrollbar_min_thumb_length(40.0)
+            .scrollbar_thumb_color(Color::BLACK)
+            .scrollbar_track_color(Color::WHITE);
+        let WidgetKind::Container { layout, .. } = &container.element.kind else {
+            panic!("expected container widget");
+        };
+
+        assert_eq!(layout.scrollbar_style.thickness, 14.0);
+        assert_eq!(layout.scrollbar_style.radius, 6.0);
+        assert_eq!(layout.scrollbar_style.insets, Insets::symmetric(3.0, 5.0));
+        assert_eq!(layout.scrollbar_style.min_thumb_length, 40.0);
+        assert_eq!(layout.scrollbar_style.thumb_color, Color::BLACK);
+        assert_eq!(layout.scrollbar_style.track_color, Color::WHITE);
+
+        let container = Container::<()>::new()
+            .scrollbar_hover_thumb_color(Color::hexa(0x11223344))
+            .scrollbar_active_thumb_color(Color::hexa(0x55667788));
+        let WidgetKind::Container { layout, .. } = &container.element.kind else {
+            panic!("expected container widget");
+        };
+
+        assert_eq!(
+            layout.scrollbar_style.hover_thumb_color,
+            Color::hexa(0x11223344)
+        );
+        assert_eq!(
+            layout.scrollbar_style.active_thumb_color,
+            Color::hexa(0x55667788)
+        );
+    }
+}

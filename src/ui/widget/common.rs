@@ -7,7 +7,7 @@ use taffy::NodeId as TaffyNodeId;
 use crate::foundation::color::Color;
 use crate::foundation::view_model::{Command, ValueCommand};
 use crate::text::font::FontWeight;
-use crate::ui::layout::{Align, Axis, Insets, Justify, Value, Wrap};
+use crate::ui::layout::{Align, Axis, Insets, Justify, Overflow, ScrollbarStyle, Value, Wrap};
 
 use super::text::Text;
 
@@ -66,6 +66,36 @@ impl Rect {
             width,
             height,
         }
+    }
+
+    pub(crate) fn right(self) -> f32 {
+        self.x + self.width
+    }
+
+    pub(crate) fn bottom(self) -> f32 {
+        self.y + self.height
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.width <= 0.0 || self.height <= 0.0
+    }
+
+    pub(crate) fn intersect(self, other: Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        let width = right - x;
+        let height = bottom - y;
+        (width > 0.0 && height > 0.0).then_some(Self::new(x, y, width, height))
+    }
+
+    pub(crate) fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
+        Self::new(x, y, right - x, bottom - y)
     }
 }
 
@@ -239,6 +269,7 @@ pub struct RenderPrimitive {
     pub color: Color,
     pub corner_radius: f32,
     pub stroke_width: f32,
+    pub clip_rect: Option<Rect>,
 }
 
 #[derive(Clone)]
@@ -251,6 +282,7 @@ pub struct TextPrimitive {
     pub font_weight: FontWeight,
     pub line_height: f32,
     pub letter_spacing: f32,
+    pub clip_rect: Option<Rect>,
 }
 
 #[derive(Clone, Default)]
@@ -279,6 +311,9 @@ pub(crate) struct ContainerLayout {
     pub align: Align,
     pub align_x: Option<Align>,
     pub align_y: Option<Align>,
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
+    pub scrollbar_style: ScrollbarStyle,
 }
 
 impl ContainerLayout {
@@ -291,6 +326,9 @@ impl ContainerLayout {
             align: Align::Start,
             align_x: None,
             align_y: None,
+            overflow_x: Overflow::Hidden,
+            overflow_y: Overflow::Hidden,
+            scrollbar_style: ScrollbarStyle::default(),
         }
     }
 }
@@ -370,12 +408,58 @@ impl<VM> Clone for HitInteraction<VM> {
 #[derive(Clone)]
 pub(crate) struct HitRegion<VM> {
     pub rect: Rect,
+    pub clip_rect: Option<Rect>,
     pub interaction: HitInteraction<VM>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScrollRegion {
+    pub id: WidgetId,
+    pub content_viewport: Rect,
+    pub visible_frame: Rect,
+    pub content_bounds: Rect,
+    pub scroll_offset: Point,
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
+    pub horizontal_track: Option<Rect>,
+    pub horizontal_thumb: Option<Rect>,
+    pub vertical_track: Option<Rect>,
+    pub vertical_thumb: Option<Rect>,
+}
+
+impl ScrollRegion {
+    pub(crate) fn max_offset(self) -> Point {
+        Point {
+            x: (self.content_bounds.right() - self.content_viewport.right()).max(0.0),
+            y: (self.content_bounds.bottom() - self.content_viewport.bottom()).max(0.0),
+        }
+    }
+
+    pub(crate) fn can_scroll_x(self) -> bool {
+        self.overflow_x == Overflow::Scroll && self.max_offset().x > 0.0
+    }
+
+    pub(crate) fn can_scroll_y(self) -> bool {
+        self.overflow_y == Overflow::Scroll && self.max_offset().y > 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ScrollbarAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ScrollbarHandle {
+    pub id: WidgetId,
+    pub axis: ScrollbarAxis,
 }
 
 pub(crate) struct ComputedScene<VM> {
     pub scene: ScenePrimitives,
     pub hit_regions: Vec<HitRegion<VM>>,
+    pub scroll_regions: Vec<ScrollRegion>,
     pub ime_cursor_area: Option<Rect>,
 }
 
@@ -384,6 +468,7 @@ impl<VM> Default for ComputedScene<VM> {
         Self {
             scene: ScenePrimitives::default(),
             hit_regions: Vec::new(),
+            scroll_regions: Vec::new(),
             ime_cursor_area: None,
         }
     }
@@ -448,5 +533,6 @@ pub(crate) struct InputSnapshot<VM> {
 #[derive(Clone, Default)]
 pub(crate) struct RenderedWidgetScene {
     pub primitives: ScenePrimitives,
+    pub scroll_regions: Vec<ScrollRegion>,
     pub ime_cursor_area: Option<Rect>,
 }

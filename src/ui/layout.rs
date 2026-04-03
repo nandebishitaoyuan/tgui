@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::animation::Transition;
 use crate::foundation::binding::Binding;
+use crate::foundation::color::Color;
 
 #[derive(Clone)]
 pub enum Value<T> {
@@ -122,6 +123,83 @@ pub enum Wrap {
     #[default]
     NoWrap,
     Wrap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Overflow {
+    Visible,
+    #[default]
+    Hidden,
+    Scroll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarStyle {
+    pub thumb_color: Color,
+    pub hover_thumb_color: Color,
+    pub active_thumb_color: Color,
+    pub track_color: Color,
+    pub thickness: f32,
+    pub radius: f32,
+    pub insets: Insets,
+    pub min_thumb_length: f32,
+}
+
+impl ScrollbarStyle {
+    pub fn thumb_color(mut self, color: Color) -> Self {
+        self.thumb_color = color;
+        self
+    }
+
+    pub fn track_color(mut self, color: Color) -> Self {
+        self.track_color = color;
+        self
+    }
+
+    pub fn hover_thumb_color(mut self, color: Color) -> Self {
+        self.hover_thumb_color = color;
+        self
+    }
+
+    pub fn active_thumb_color(mut self, color: Color) -> Self {
+        self.active_thumb_color = color;
+        self
+    }
+
+    pub fn thickness(mut self, thickness: f32) -> Self {
+        self.thickness = thickness;
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+
+    pub fn insets(mut self, insets: Insets) -> Self {
+        self.insets = insets;
+        self
+    }
+
+    pub fn min_thumb_length(mut self, min_thumb_length: f32) -> Self {
+        self.min_thumb_length = min_thumb_length;
+        self
+    }
+}
+
+impl Default for ScrollbarStyle {
+    fn default() -> Self {
+        Self {
+            thumb_color: Color::hexa(0xFFFFFFFF).with_alpha_factor(0.72),
+            hover_thumb_color: Color::hexa(0xFFFFFFFF).with_alpha_factor(0.86),
+            active_thumb_color: Color::hexa(0xFFFFFFFF),
+            track_color: Color::hexa(0xFFFFFF1F),
+            thickness: 8.0,
+            radius: 999.0,
+            insets: Insets::all(6.0),
+            min_thumb_length: 28.0,
+        }
+    }
 }
 
 #[derive(Clone)]

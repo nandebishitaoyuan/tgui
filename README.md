@@ -51,6 +51,9 @@ This project is under active development.
   - `border_radius(...)`
   - `opacity(...)`
   - `offset(...)`
+  - `overflow(...)`
+  - `overflow_x(...)`
+  - `overflow_y(...)`
 - Public interaction APIs:
   - `on_click(...)`
   - `on_double_click(...)`
@@ -65,6 +68,8 @@ This project is under active development.
   - built-in interpolation for `Color`, `f32`, `Point`, and `Insets`
   - layout animation for width, height, gap, padding, margin, and grow
 - Runtime theme transitions when switching `ThemeMode`
+- Container overflow clipping with optional bi-directional mouse-wheel scrolling
+- Visual scrollbars for scrollable containers with customizable styling
 
 ## Installation
 
@@ -267,6 +272,37 @@ let card = Stack::new()
 
 Mouse interaction APIs are available on layout widgets as well, not only on buttons.
 
+Containers clip overflow by default. Opt into visibility or scrolling per axis:
+
+```rust
+use tgui::{Column, Overflow, ScrollbarStyle};
+
+let list = Column::new()
+    .height(320.0)
+    .overflow_y(Overflow::Scroll)
+    .scrollbar_style(
+        ScrollbarStyle::default()
+            .thickness(10.0)
+            .hover_thumb_color(tgui::Color::hexa(0x67E8F9F2))
+            .active_thumb_color(tgui::Color::WHITE)
+            .min_thumb_length(36.0),
+    );
+```
+
+Scrollbar styling can also be tuned with convenience builders on any layout container:
+
+- `scrollbar_style(...)`
+- `scrollbar_thumb_color(...)`
+- `scrollbar_hover_thumb_color(...)`
+- `scrollbar_active_thumb_color(...)`
+- `scrollbar_track_color(...)`
+- `scrollbar_thickness(...)`
+- `scrollbar_radius(...)`
+- `scrollbar_insets(...)`
+- `scrollbar_min_thumb_length(...)`
+
+Scrollbars respond to both mouse-wheel scrolling and direct thumb dragging.
+
 ## Themes and Fonts
 
 Set a fixed theme:
@@ -319,6 +355,7 @@ Available examples in this repository:
 - `theme`
 - `input`
 - `layout`
+- `scroll`
 - `layout_theme_showcase`
 - `widgets_showcase`
 
@@ -331,6 +368,7 @@ cargo run --example animation_showcase
 cargo run --example timeline_controller
 cargo run --example theme
 cargo run --example input
+cargo run --example scroll
 ```
 
 ## Development
