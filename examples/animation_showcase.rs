@@ -1,18 +1,18 @@
 use std::time::Duration;
 
 use tgui::{
-    Application, Binding, Button, Color, Column, Command, Insets, PlaybackDirection, Point, Text,
-    Transition, ViewModelContext,
+    Align, Application, Binding, Button, Color, Column, Command, Insets, Justify, Observable,
+    Point, Stack, Text, TguiError, Transition, ViewModelContext,
 };
 
-struct AnimationShowcaseVm {
-    expanded: tgui::Observable<bool>,
+struct AnimationVm {
+    expanded: Observable<bool>,
 }
 
-impl AnimationShowcaseVm {
-    fn new(context: &ViewModelContext) -> Self {
+impl AnimationVm {
+    fn new(ctx: &ViewModelContext) -> Self {
         Self {
-            expanded: context.observable(false),
+            expanded: ctx.observable(false),
         }
     }
 
@@ -31,34 +31,52 @@ impl AnimationShowcaseVm {
             .binding()
             .map(|expanded| {
                 if expanded {
-                    Color::hexa(0x0F172AFF)
+                    Color::hexa(0x08111FFF)
                 } else {
-                    Color::hexa(0xFFF7EDFF)
+                    Color::hexa(0x1A1024FF)
                 }
             })
+            .animated(Transition::ease_in_out(Duration::from_millis(340)))
+    }
+
+    fn card_width(&self) -> Binding<f32> {
+        self.expanded
+            .binding()
+            .map(|expanded| if expanded { 520.0 } else { 320.0 })
             .animated(Transition::ease_in_out(Duration::from_millis(320)))
     }
 
-    fn card_color(&self) -> Binding<Color> {
+    fn card_padding(&self) -> Binding<Insets> {
         self.expanded
             .binding()
             .map(|expanded| {
                 if expanded {
-                    Color::hexa(0x2563EBFF)
+                    Insets::symmetric(28.0, 22.0)
                 } else {
-                    Color::hexa(0xF97316FF)
+                    Insets::symmetric(18.0, 14.0)
                 }
             })
-            .animated(Transition::ease_out(Duration::from_millis(240)))
+            .animated(Transition::ease_in_out(Duration::from_millis(300)))
     }
 
-    fn card_opacity(&self) -> Binding<f32> {
+    fn card_radius(&self) -> Binding<f32> {
         self.expanded
             .binding()
-            .map(|expanded| if expanded { 1.0 } else { 0.72 })
-            .animated(
-                Transition::ease_out(Duration::from_millis(220)).delay(Duration::from_millis(20)),
-            )
+            .map(|expanded| if expanded { 24.0 } else { 14.0 })
+            .animated(Transition::ease_out(Duration::from_millis(260)))
+    }
+
+    fn card_background(&self) -> Binding<Color> {
+        self.expanded
+            .binding()
+            .map(|expanded| {
+                if expanded {
+                    Color::hexa(0x0F766EFF)
+                } else {
+                    Color::hexa(0x9333EAFF)
+                }
+            })
+            .animated(Transition::ease_in_out(Duration::from_millis(280)))
     }
 
     fn card_offset(&self) -> Binding<Point> {
@@ -71,53 +89,24 @@ impl AnimationShowcaseVm {
                     Point { x: 0.0, y: 28.0 }
                 }
             })
-            .animated(Transition::ease_in_out(Duration::from_millis(260)))
-    }
-
-    fn card_width(&self) -> Binding<f32> {
-        self.expanded
-            .binding()
-            .map(|expanded| if expanded { 280.0 } else { 180.0 })
-            .animated(
-                Transition::ease_in_out(Duration::from_millis(320))
-                    .delay(Duration::from_millis(30)),
-            )
-    }
-
-    fn card_padding(&self) -> Binding<Insets> {
-        self.expanded
-            .binding()
-            .map(|expanded| {
-                if expanded {
-                    Insets::symmetric(28.0, 18.0)
-                } else {
-                    Insets::symmetric(16.0, 12.0)
-                }
-            })
             .animated(Transition::ease_in_out(Duration::from_millis(280)))
     }
 
-    fn stack_gap(&self) -> Binding<f32> {
+    fn body_opacity(&self) -> Binding<f32> {
         self.expanded
             .binding()
-            .map(|expanded| if expanded { 28.0 } else { 16.0 })
-            .animated(
-                Transition::ease_in_out(Duration::from_millis(300))
-                    .direction(PlaybackDirection::Normal),
-            )
+            .map(|expanded| if expanded { 1.0 } else { 0.72 })
+            .animated(Transition::ease_out(Duration::from_millis(220)))
     }
 
-    fn hint_color(&self) -> Binding<Color> {
-        self.expanded
-            .binding()
-            .map(|expanded| {
-                if expanded {
-                    Color::hexa(0xDBEAFEFF)
-                } else {
-                    Color::hexa(0x7C2D12FF)
-                }
-            })
-            .animated(Transition::default())
+    fn action_label(&self) -> Binding<String> {
+        self.expanded.binding().map(|expanded| {
+            if expanded {
+                "Collapse".to_string()
+            } else {
+                "Expand".to_string()
+            }
+        })
     }
 
     fn toggle(&mut self) {
@@ -125,41 +114,49 @@ impl AnimationShowcaseVm {
     }
 
     fn view(&self) -> tgui::Element<Self> {
-        Column::new()
+        Stack::new()
+            .fill_size()
             .padding(Insets::all(24.0))
-            .gap(self.stack_gap())
+            .align(Align::Center)
+            .justify(Justify::Center)
             .child(
-                Text::new(
-                    "Declarative transitions for color, opacity, offset and layout".to_string(),
-                )
-                .color(self.hint_color()),
-            )
-            .child(
-                Button::new(Text::new(self.expanded.binding().map(|expanded| {
-                    if expanded {
-                        "Collapse card".to_string()
-                    } else {
-                        "Expand card".to_string()
-                    }
-                })))
-                .width(self.card_width())
-                .padding(self.card_padding())
-                .background(self.card_color())
-                .opacity(self.card_opacity())
-                .offset(self.card_offset())
-                .on_click(Command::new(Self::toggle)),
+                Column::new()
+                    .width(self.card_width())
+                    .padding(self.card_padding())
+                    .gap(16.0)
+                    .background(self.card_background())
+                    .border(1.0, Color::hexa(0xE2E8F055))
+                    .border_radius(self.card_radius())
+                    .offset(self.card_offset())
+                    .child(
+                        Text::new("Declarative transitions")
+                            .font_size(26.0)
+                            .color(Color::hexa(0xF8FAFCFF)),
+                    )
+                    .child(
+                        Text::new("This single boolean drives animated width, padding, radius, color, offset, opacity, and window clear color.")
+                            .font_size(15.0)
+                            .opacity(self.body_opacity())
+                            .color(Color::hexa(0xECFEFFFF)),
+                    )
+                    .child(
+                        Button::new(Text::new(self.action_label()))
+                            .fill_width()
+                            .background(Color::hexa(0x0F172AFF))
+                            .border_radius(12.0)
+                            .on_click(Command::new(Self::toggle)),
+                    ),
             )
             .into()
     }
 }
 
-fn main() -> Result<(), tgui::TguiError> {
+fn main() -> Result<(), TguiError> {
     Application::new()
-        .title("tgui animation showcase")
-        .window_size(960, 640)
-        .with_view_model(AnimationShowcaseVm::new)
-        .bind_title(AnimationShowcaseVm::title)
-        .bind_clear_color(AnimationShowcaseVm::clear_color)
-        .root_view(AnimationShowcaseVm::view)
+        .window_size(980, 680)
+        .with_view_model(AnimationVm::new)
+        .bind_title(AnimationVm::title)
+        .bind_clear_color(AnimationVm::clear_color)
+        .root_view(AnimationVm::view)
         .run()
 }

@@ -1,49 +1,160 @@
 use tgui::{
-    Align, Application, Axis, Color, Column, Element, Flex, Text, TguiError, ViewModelContext, Wrap,
+    Align, Application, Axis, Color, Column, Flex, Grid, Insets, Row, Stack, Text, TguiError, Wrap,
 };
 
 fn main() -> Result<(), TguiError> {
     Application::new()
-        .title("Layout Demo")
-        .with_view_model(LayoutDemo::new)
-        .root_view(LayoutDemo::view)
+        .title("tgui layout overview")
+        .window_size(1100, 760)
+        .with_view_model(|_| ())
+        .root_view(|_| {
+            Column::new()
+                .fill_size()
+                .padding(Insets::all(24.0))
+                .gap(18.0)
+                .background(Color::hexa(0x0F172AFF))
+                .child(
+                    Text::new("Layout containers")
+                        .font_size(28.0)
+                        .color(Color::hexa(0xF8FAFCFF)),
+                )
+                .child(
+                    Text::new("This example shows how Row, Column, Grid, Flex, and Stack can be combined into one responsive page.")
+                        .font_size(15.0)
+                        .color(Color::hexa(0xCBD5E1FF)),
+                )
+                .child(
+                    Row::new()
+                        .gap(18.0)
+                        .child(row_panel().grow(1.0))
+                        .child(column_panel().grow(1.0)),
+                )
+                .child(
+                    Row::new()
+                        .gap(18.0)
+                        .child(grid_panel().grow(1.0))
+                        .child(flex_panel().grow(1.0)),
+                )
+                .child(stack_panel())
+                .into()
+        })
         .run()
 }
 
-struct LayoutDemo {}
+fn panel(title: &str, subtitle: &str) -> Column<()> {
+    Column::new()
+        .padding(Insets::all(18.0))
+        .gap(12.0)
+        .background(Color::hexa(0x111827FF))
+        .border(1.0, Color::hexa(0x334155FF))
+        .border_radius(16.0)
+        .child(
+            Text::new(title)
+                .font_size(20.0)
+                .color(Color::hexa(0xF8FAFCFF)),
+        )
+        .child(
+            Text::new(subtitle)
+                .font_size(14.0)
+                .color(Color::hexa(0x94A3B8FF)),
+        )
+}
 
-impl LayoutDemo {
-    fn new(_: &ViewModelContext) -> Self {
-        Self {}
-    }
+fn block(label: &str, color: Color) -> Stack<()> {
+    Stack::new()
+        .height(56.0)
+        .background(color)
+        .border_radius(12.0)
+        .align(Align::Center)
+        .child(Text::new(label).color(Color::WHITE))
+}
 
-    fn view(&self) -> Element<Self> {
+fn chip(label: &str) -> Stack<()> {
+    Stack::new()
+        .padding(Insets::symmetric(14.0, 10.0))
+        .background(Color::hexa(0x1D4ED8FF))
+        .border_radius(999.0)
+        .child(Text::new(label).color(Color::WHITE))
+}
+
+fn row_panel() -> Column<()> {
+    panel("Row", "Horizontal layout with shared spacing.").child(
+        Row::new()
+            .gap(10.0)
+            .child(block("Left", Color::hexa(0x0F766EFF)).grow(1.0))
+            .child(block("Center", Color::hexa(0x0369A1FF)).grow(1.0))
+            .child(block("Right", Color::hexa(0x7C3AEDFF)).grow(1.0)),
+    )
+}
+
+fn column_panel() -> Column<()> {
+    panel(
+        "Column",
+        "Vertical stacking is great for forms and dashboards.",
+    )
+    .child(block("Header", Color::hexa(0x1D4ED8FF)))
+    .child(block("Body", Color::hexa(0x334155FF)))
+    .child(block("Footer", Color::hexa(0x475569FF)))
+}
+
+fn grid_panel() -> Column<()> {
+    panel(
+        "Grid",
+        "Regular cells work well for galleries and analytics.",
+    )
+    .child(
+        Grid::new(3)
+            .gap(10.0)
+            .child(block("A1", Color::hexa(0x1E3A8AFF)))
+            .child(block("A2", Color::hexa(0x1D4ED8FF)))
+            .child(block("A3", Color::hexa(0x2563EBFF)))
+            .child(block("B1", Color::hexa(0x0F766EFF)))
+            .child(block("B2", Color::hexa(0x0891B2FF)))
+            .child(block("B3", Color::hexa(0x7C3AEDFF))),
+    )
+}
+
+fn flex_panel() -> Column<()> {
+    panel(
+        "Flex + Wrap",
+        "Wrap long chip lists without building a manual grid.",
+    )
+    .child(
         Flex::new(Axis::Horizontal)
-            .fill_size()
-            .gap(20.0)
+            .gap(10.0)
             .wrap(Wrap::Wrap)
-            .child(Self::column_layout(
-                Align::Start,
-                "Align::Start".to_string(),
-            ))
-            .child(Self::column_layout(
-                Align::Center,
-                "Align::Center".to_string(),
-            ))
-            .child(Self::column_layout(Align::End, "Align::End".to_string()))
-            .child(Self::column_layout(
-                Align::Stretch,
-                "Align::Stretch".to_string(),
-            ))
-            .into()
-    }
+            .child(chip("Search"))
+            .child(chip("Billing"))
+            .child(chip("Settings"))
+            .child(chip("Workspace"))
+            .child(chip("Integrations"))
+            .child(chip("Automation"))
+            .child(chip("Release notes"))
+            .child(chip("Support")),
+    )
+}
 
-    fn column_layout(align: Align, align_text: String) -> Element<Self> {
-        Column::new()
-            .size(200.0, 200.0)
-            .background(Color::rgba(255, 255, 255, 100))
-            .align(align)
-            .child(Text::new(align_text).color(Color::BLACK))
-            .into()
-    }
+fn stack_panel() -> Column<()> {
+    panel("Stack", "Overlay a badge on top of a base surface.").child(
+        Stack::new()
+            .height(120.0)
+            .background(Color::hexa(0x172554FF))
+            .border_radius(16.0)
+            .child(
+                Stack::new()
+                    .width(160.0)
+                    .height(40.0)
+                    .margin(Insets::all(12.0))
+                    .background(Color::hexa(0xF97316FF))
+                    .border_radius(999.0)
+                    .align(Align::Center)
+                    .child(Text::new("Overlay badge").color(Color::WHITE)),
+            )
+            .align(Align::Center)
+            .child(
+                Text::new("Base layer")
+                    .font_size(18.0)
+                    .color(Color::hexa(0xDBEAFEFF)),
+            ),
+    )
 }
