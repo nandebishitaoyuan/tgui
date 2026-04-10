@@ -9,17 +9,16 @@ use crate::animation::{
 use crate::application::{
     ApplicationConfig, ThemeSelection, WindowClosePolicy, WindowRole, WindowSetFactory,
 };
+use crate::dialog::{async_dialog_channel, AsyncDialogDispatcher, AsyncDialogReceiver, Dialogs};
 use crate::foundation::binding::{Binding, InvalidationSignal};
 use crate::foundation::color::Color;
 use crate::foundation::error::TguiError;
 use crate::foundation::event::InputTrigger;
-use crate::foundation::view_model::{Command, ViewModel};
+use crate::foundation::view_model::{Command, CommandContext, ValueCommand, ViewModel};
 #[cfg(all(target_os = "android", feature = "android"))]
 use crate::platform::android::activity::ndk::configuration::UiModeNight;
 #[cfg(all(target_os = "android", feature = "android"))]
 use crate::platform::android::activity::AndroidApp;
-#[cfg(all(target_env = "ohos", feature = "ohos"))]
-use crate::platform::ohos::OhosApp;
 use crate::platform::backend::application::ApplicationHandler;
 use crate::platform::backend::event_loop::{ActiveEventLoop, ControlFlow};
 use crate::platform::backend::window::Window;
@@ -30,6 +29,8 @@ use crate::platform::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
 };
 use crate::platform::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+#[cfg(all(target_env = "ohos", feature = "ohos"))]
+use crate::platform::ohos::OhosApp;
 use crate::platform::window::{
     ImeCapabilities, ImeEnableRequest, ImeHint, ImePurpose, ImeRequest, ImeRequestData,
     Theme as WindowTheme, WindowAttributes, WindowId,
@@ -150,6 +151,7 @@ pub struct BoundRuntime<VM> {
 }
 
 struct SingleWindowSetup<VM> {
+    key: String,
     window_bindings: WindowBindings,
     widget_tree: Option<WidgetTree<VM>>,
     commands: Vec<WindowCommand<VM>>,
@@ -195,6 +197,7 @@ impl<VM: ViewModel> BoundRuntime<VM> {
             view_model: Arc::new(Mutex::new(view_model)),
             windows: None,
             single_window: Some(SingleWindowSetup {
+                key: "main".to_string(),
                 window_bindings,
                 widget_tree,
                 commands,
@@ -223,6 +226,7 @@ impl<VM: ViewModel> BoundRuntime<VM> {
             view_model: Arc::new(Mutex::new(view_model)),
             windows: None,
             single_window: Some(SingleWindowSetup {
+                key: "main".to_string(),
                 window_bindings,
                 widget_tree,
                 commands,
@@ -264,7 +268,10 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         invalidation: InvalidationSignal,
         animations: AnimationCoordinator,
     ) -> BoundRuntimeHandler<VM> {
+        let (dialog_dispatcher, dialog_receiver) = async_dialog_channel();
         BoundRuntimeHandler::new(
+            "main".to_string(),
+            1,
             WindowRole::Main,
             config,
             Arc::new(Mutex::new(view_model)),
@@ -273,6 +280,8 @@ impl<VM: ViewModel> BoundRuntime<VM> {
             commands,
             invalidation,
             animations,
+            dialog_dispatcher,
+            Some(dialog_receiver),
             #[cfg(all(target_os = "android", feature = "android"))]
             None,
         )
@@ -282,7 +291,8 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         let handler = MultiWindowHandler::new(
             self.config,
             self.view_model,
-            self.windows.expect("desktop runtime requires a window factory"),
+            self.windows
+                .expect("desktop runtime requires a window factory"),
             self.invalidation,
             self.animations,
         );
@@ -293,7 +303,10 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         let single_window = self
             .single_window
             .expect("single-window runtime requires a window definition");
+        let (dialog_dispatcher, dialog_receiver) = async_dialog_channel();
         let handler = BoundRuntimeHandler::new(
+            single_window.key,
+            1,
             WindowRole::Main,
             self.config,
             self.view_model,
@@ -302,6 +315,8 @@ impl<VM: ViewModel> BoundRuntime<VM> {
             single_window.commands,
             self.invalidation,
             self.animations,
+            dialog_dispatcher,
+            Some(dialog_receiver),
             #[cfg(all(target_os = "android", feature = "android"))]
             self.android_app,
         );
@@ -520,6 +535,8 @@ impl RuntimeHandler {
 
 #[doc(hidden)]
 pub struct BoundRuntimeHandler<VM> {
+    window_key: String,
+    window_instance_id: u64,
     role: WindowRole,
     config: ApplicationConfig,
     font_manager: FontManager,
@@ -552,6 +569,8 @@ pub struct BoundRuntimeHandler<VM> {
     renderer: Option<Renderer>,
     window_id: Option<WindowId>,
     error: Option<TguiError>,
+    dialog_dispatcher: AsyncDialogDispatcher<VM>,
+    dialog_receiver: Option<AsyncDialogReceiver<VM>>,
     #[cfg(all(target_os = "android", feature = "android"))]
     android_app: Option<AndroidApp>,
     #[cfg(all(target_os = "android", feature = "android"))]
@@ -644,8 +663,10 @@ impl ClipboardService {
     }
 }
 
-impl<VM> BoundRuntimeHandler<VM> {
+impl<VM: 'static> BoundRuntimeHandler<VM> {
     fn new(
+        window_key: String,
+        window_instance_id: u64,
         role: WindowRole,
         config: ApplicationConfig,
         view_model: Arc<Mutex<VM>>,
@@ -654,6 +675,8 @@ impl<VM> BoundRuntimeHandler<VM> {
         commands: Vec<WindowCommand<VM>>,
         invalidation: InvalidationSignal,
         animations: AnimationCoordinator,
+        dialog_dispatcher: AsyncDialogDispatcher<VM>,
+        dialog_receiver: Option<AsyncDialogReceiver<VM>>,
         #[cfg(all(target_os = "android", feature = "android"))] android_app: Option<AndroidApp>,
     ) -> Self {
         let font_manager = FontManager::new(&config.fonts);
@@ -662,6 +685,8 @@ impl<VM> BoundRuntimeHandler<VM> {
             ThemeSelection::System => Theme::default(),
         };
         Self {
+            window_key,
+            window_instance_id,
             role,
             config,
             font_manager,
@@ -694,6 +719,8 @@ impl<VM> BoundRuntimeHandler<VM> {
             renderer: None,
             window_id: None,
             error: None,
+            dialog_dispatcher,
+            dialog_receiver,
             #[cfg(all(target_os = "android", feature = "android"))]
             android_app,
             #[cfg(all(target_os = "android", feature = "android"))]
@@ -704,6 +731,63 @@ impl<VM> BoundRuntimeHandler<VM> {
     fn with_view_model<R>(&self, f: impl FnOnce(&mut VM) -> R) -> R {
         let mut view_model = self.view_model.lock().expect("view model lock poisoned");
         f(&mut view_model)
+    }
+
+    fn command_context(&self) -> CommandContext<VM> {
+        CommandContext::new(Dialogs::from_runtime(
+            self.window_key.clone(),
+            self.window_instance_id,
+            self.window.as_ref(),
+            self.dialog_dispatcher.clone(),
+        ))
+    }
+
+    fn set_dialog_proxy(&self, event_loop: &dyn ActiveEventLoop) {
+        self.dialog_dispatcher.set_proxy(event_loop.create_proxy());
+    }
+
+    fn execute_command(&mut self, command: &Command<VM>) {
+        let context = self.command_context();
+        self.with_view_model(|view_model| command.execute_with_context(view_model, &context));
+        self.invalidate_scene();
+        self.invalidation.mark_dirty();
+    }
+
+    fn execute_value_command<V>(&mut self, command: &ValueCommand<VM, V>, value: V) {
+        let context = self.command_context();
+        self.with_view_model(|view_model| {
+            command.execute_with_context(view_model, value, &context)
+        });
+        self.invalidate_scene();
+        self.invalidation.mark_dirty();
+    }
+
+    fn drain_dialog_completions(&mut self) -> bool {
+        let completions: Vec<_> = self
+            .dialog_receiver
+            .as_ref()
+            .map(|receiver| receiver.try_iter().collect())
+            .unwrap_or_default();
+
+        if completions.is_empty() {
+            return false;
+        }
+
+        for completion in completions {
+            if completion.window_instance_id != self.window_instance_id {
+                continue;
+            }
+            let context = self.command_context();
+            self.with_view_model(|view_model| (completion.callback)(view_model, &context));
+            self.invalidate_scene();
+            self.invalidation.mark_dirty();
+        }
+
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+
+        true
     }
 
     fn set_definition(
@@ -983,9 +1067,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         self.cursor_position = None;
         for hovered in std::mem::take(&mut self.hovered_widgets).into_iter().rev() {
             if let Some(command) = hovered.on_mouse_leave {
-                self.with_view_model(|view_model| command.execute(view_model));
-                self.invalidate_scene();
-                self.invalidation.mark_dirty();
+                self.execute_command(&command);
             }
         }
         self.hovered_scrollbar = self.active_scrollbar_drag.map(|drag| drag.handle);
@@ -1230,9 +1312,7 @@ impl<VM> BoundRuntimeHandler<VM> {
 
         if let Some(pending) = self.pending_click.take() {
             if let Some(command) = pending.command {
-                self.with_view_model(|view_model| command.execute(view_model));
-                self.invalidate_scene();
-                self.invalidation.mark_dirty();
+                self.execute_command(&command);
             }
         }
     }
@@ -1335,8 +1415,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         self.reset_caret_blink(Instant::now());
 
         if let Some(command) = snapshot.on_change.clone() {
-            self.with_view_model(|view_model| command.execute(view_model, new_text));
-            self.invalidation.mark_dirty();
+            self.execute_value_command(&command, new_text);
         }
 
         self.invalidate_scene();
@@ -1628,26 +1707,20 @@ impl<VM> BoundRuntimeHandler<VM> {
         let previous_hovered = std::mem::take(&mut self.hovered_widgets);
         for previous in previous_hovered[prefix_len..].iter().rev() {
             if let Some(command) = previous.on_mouse_leave.clone() {
-                self.with_view_model(|view_model| command.execute(view_model));
-                self.invalidate_scene();
-                self.invalidation.mark_dirty();
+                self.execute_command(&command);
             }
         }
 
         for hovered in next_hovered[prefix_len..].iter() {
             if let Some(command) = hovered.on_mouse_enter.clone() {
-                self.with_view_model(|view_model| command.execute(view_model));
-                self.invalidate_scene();
-                self.invalidation.mark_dirty();
+                self.execute_command(&command);
             }
         }
 
         if let Some(position) = cursor_position {
             for hovered in &next_hovered {
                 if let Some(command) = hovered.on_mouse_move.clone() {
-                    self.with_view_model(|view_model| command.execute(view_model, position));
-                    self.invalidate_scene();
-                    self.invalidation.mark_dirty();
+                    self.execute_value_command(&command, position);
                 }
             }
         }
@@ -1909,7 +1982,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         let mut fired_handler = false;
         if let Some(previous) = self.focused_widget.take() {
             if let Some(command) = previous.on_blur {
-                self.with_view_model(|view_model| command.execute(view_model));
+                self.execute_command(&command);
                 fired_handler = true;
             }
         }
@@ -1924,14 +1997,13 @@ impl<VM> BoundRuntimeHandler<VM> {
 
         if let Some(command) = on_focus {
             if next_id.is_some() {
-                self.with_view_model(|view_model| command.execute(view_model));
+                self.execute_command(&command);
                 fired_handler = true;
             }
         }
 
         if fired_handler {
             self.invalidate_scene();
-            self.invalidation.mark_dirty();
         }
     }
 
@@ -1993,9 +2065,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         if is_double_click {
             self.pending_click = None;
             if let Some(command) = interactions.on_double_click.or(interactions.on_click) {
-                self.with_view_model(|view_model| command.execute(view_model));
-                self.invalidate_scene();
-                self.invalidation.mark_dirty();
+                self.execute_command(&command);
             }
             return;
         }
@@ -2007,9 +2077,7 @@ impl<VM> BoundRuntimeHandler<VM> {
                 command: interactions.on_click,
             });
         } else if let Some(command) = interactions.on_click {
-            self.with_view_model(|view_model| command.execute(view_model));
-            self.invalidate_scene();
-            self.invalidation.mark_dirty();
+            self.execute_command(&command);
         } else {
             self.pending_click = None;
         }
@@ -2020,6 +2088,8 @@ impl<VM> BoundRuntimeHandler<VM> {
     }
 
     fn create_or_resume_surface(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.set_dialog_proxy(event_loop);
+
         if self.window.is_some() && self.renderer.is_some() {
             return;
         }
@@ -2153,10 +2223,9 @@ impl<VM> BoundRuntimeHandler<VM> {
             .commands
             .iter()
             .find(|entry| entry.trigger.matches(&event))
+            .cloned()
         {
-            self.with_view_model(|view_model| window_command.command.execute(view_model));
-            self.invalidate_scene();
-            self.invalidation.mark_dirty();
+            self.execute_command(&window_command.command);
         }
 
         match event {
@@ -2269,6 +2338,9 @@ struct MultiWindowHandler<VM> {
     windows: WindowSetFactory<VM>,
     invalidation: InvalidationSignal,
     animations: AnimationCoordinator,
+    dialog_dispatcher: AsyncDialogDispatcher<VM>,
+    dialog_receiver: AsyncDialogReceiver<VM>,
+    next_window_instance_id: u64,
     windows_by_key: HashMap<String, BoundRuntimeHandler<VM>>,
     window_keys_by_id: HashMap<WindowId, String>,
     closed_window_keys: HashSet<String>,
@@ -2286,12 +2358,16 @@ impl<VM: ViewModel> MultiWindowHandler<VM> {
         invalidation: InvalidationSignal,
         animations: AnimationCoordinator,
     ) -> Self {
+        let (dialog_dispatcher, dialog_receiver) = async_dialog_channel();
         Self {
             config,
             view_model,
             windows,
             invalidation,
             animations,
+            dialog_dispatcher,
+            dialog_receiver,
+            next_window_instance_id: 1,
             windows_by_key: HashMap::new(),
             window_keys_by_id: HashMap::new(),
             closed_window_keys: HashSet::new(),
@@ -2306,6 +2382,36 @@ impl<VM: ViewModel> MultiWindowHandler<VM> {
         eprintln!("tgui multi-window runtime failed: {error}");
         self.error = Some(error);
         event_loop.exit();
+    }
+
+    fn next_window_instance_id(&mut self) -> u64 {
+        let next = self.next_window_instance_id;
+        self.next_window_instance_id = self.next_window_instance_id.wrapping_add(1);
+        next
+    }
+
+    fn set_dialog_proxy(&self, event_loop: &dyn ActiveEventLoop) {
+        self.dialog_dispatcher.set_proxy(event_loop.create_proxy());
+    }
+
+    fn drain_dialog_completions(&mut self) {
+        let completions: Vec<_> = self.dialog_receiver.try_iter().collect();
+        for completion in completions {
+            let Some(window) = self.windows_by_key.get_mut(&completion.window_key) else {
+                continue;
+            };
+            if completion.window_instance_id != window.window_instance_id {
+                continue;
+            }
+
+            let context = window.command_context();
+            window.with_view_model(|view_model| (completion.callback)(view_model, &context));
+            window.invalidate_scene();
+            self.invalidation.mark_dirty();
+            if let Some(native_window) = window.window.as_ref() {
+                native_window.request_redraw();
+            }
+        }
     }
 
     fn resolve_windows(&self) -> Result<Vec<ResolvedWindowSpec<VM>>, TguiError> {
@@ -2398,8 +2504,10 @@ impl<VM: ViewModel> MultiWindowHandler<VM> {
             }
         };
 
-        let desired_keys: HashSet<String> = resolved.iter().map(|window| window.key.clone()).collect();
-        self.closed_window_keys.retain(|key| desired_keys.contains(key));
+        let desired_keys: HashSet<String> =
+            resolved.iter().map(|window| window.key.clone()).collect();
+        self.closed_window_keys
+            .retain(|key| desired_keys.contains(key));
 
         for resolved_window in resolved {
             if self.closed_window_keys.contains(&resolved_window.key) {
@@ -2420,12 +2528,15 @@ impl<VM: ViewModel> MultiWindowHandler<VM> {
                     self.fail(event_loop, error);
                     return;
                 }
-                self.window_keys_by_id.retain(|_, existing_key| existing_key != &key);
+                self.window_keys_by_id
+                    .retain(|_, existing_key| existing_key != &key);
                 if let Some(window_id) = window.window_id() {
                     self.window_keys_by_id.insert(window_id, key);
                 }
             } else {
                 let mut window = BoundRuntimeHandler::new(
+                    key.clone(),
+                    self.next_window_instance_id(),
                     resolved_window.role,
                     resolved_window.config,
                     self.view_model.clone(),
@@ -2434,6 +2545,8 @@ impl<VM: ViewModel> MultiWindowHandler<VM> {
                     resolved_window.commands,
                     self.invalidation.clone(),
                     self.animations.clone(),
+                    self.dialog_dispatcher.clone(),
+                    None,
                     #[cfg(all(target_os = "android", feature = "android"))]
                     None,
                 );
@@ -2482,7 +2595,12 @@ impl<VM: ViewModel> MultiWindowHandler<VM> {
 
 impl<VM: ViewModel> ApplicationHandler for MultiWindowHandler<VM> {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.set_dialog_proxy(event_loop);
         self.sync_windows(event_loop, true);
+    }
+
+    fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        self.drain_dialog_completions();
     }
 
     fn window_event(
@@ -2544,6 +2662,7 @@ impl<VM: ViewModel> ApplicationHandler for MultiWindowHandler<VM> {
             return;
         }
 
+        self.drain_dialog_completions();
         self.sync_windows(event_loop, false);
         if self.error.is_some() {
             return;
@@ -2557,7 +2676,8 @@ impl<VM: ViewModel> ApplicationHandler for MultiWindowHandler<VM> {
                     self.fail(event_loop, error);
                     return;
                 }
-                self.window_keys_by_id.retain(|_, existing_key| existing_key != &key);
+                self.window_keys_by_id
+                    .retain(|_, existing_key| existing_key != &key);
                 if let Some(window_id) = window.window_id() {
                     self.window_keys_by_id.insert(window_id, key.clone());
                 }
@@ -2704,6 +2824,10 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
         self.create_or_resume_surface(event_loop);
     }
 
+    fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        self.drain_dialog_completions();
+    }
+
     fn window_event(
         &mut self,
         event_loop: &dyn ActiveEventLoop,
@@ -2720,6 +2844,7 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
     }
 
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.drain_dialog_completions();
         self.handle_bound_about_to_wait(event_loop);
     }
 

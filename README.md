@@ -62,6 +62,12 @@ This project is under active development.
   - `on_mouse_leave(...)`
   - `on_mouse_move(...)`
   - `on_focus(...)` / `on_blur(...)` on `Button` and `Input`
+- Built-in desktop file dialogs:
+  - synchronous modal file/folder/save dialogs via `Command::new_with_context(...)`
+  - asynchronous file/folder/save dialogs with result callbacks on the shared view model
+- Built-in desktop message dialogs:
+  - synchronous and asynchronous alert/confirm style dialogs
+  - owner-bound to the current runtime window automatically
 - Advanced animation APIs:
   - declarative `Binding::animated(...)` with `Transition` or `AnimationSpec<T>`
   - command-style `AnimatedValue<T>` + `ViewModelContext::timeline()`
@@ -238,6 +244,104 @@ fn main() -> Result<(), tgui::TguiError> {
 }
 ```
 
+### Built-in File Dialogs
+
+Use `Command::new_with_context(...)` when a handler needs runtime services such
+as desktop dialogs:
+
+```rust
+use tgui::{Application, Button, Column, Command, FileDialogOptions, Text, ViewModelContext};
+
+struct AppVm {
+    selected: tgui::Observable<String>,
+}
+
+impl AppVm {
+    fn new(ctx: &ViewModelContext) -> Self {
+        Self {
+            selected: ctx.observable("Nothing selected".to_string()),
+        }
+    }
+
+    fn view(&self) -> tgui::Element<Self> {
+        Column::new()
+            .child(
+                Button::new(Text::new("Open file"))
+                    .on_click(Command::new_with_context(|vm, ctx| {
+                        if let Ok(Some(path)) = ctx.dialogs().open_file(
+                            FileDialogOptions::new().add_filter("Text", &["txt", "md"]),
+                        ) {
+                            vm.selected.set(path.display().to_string());
+                        }
+                    })),
+            )
+            .child(Text::new(self.selected.binding()))
+            .into()
+    }
+}
+
+fn main() -> Result<(), tgui::TguiError> {
+    Application::new()
+        .with_view_model(AppVm::new)
+        .root_view(AppVm::view)
+        .run()
+}
+```
+
+### Built-in Message Dialogs
+
+Use the same command context to show owner-bound native message dialogs:
+
+```rust
+use tgui::{
+    Application, Button, Column, Command, MessageDialogButtons, MessageDialogLevel,
+    MessageDialogOptions, MessageDialogResult, Text, ViewModelContext,
+};
+
+struct AppVm {
+    status: tgui::Observable<String>,
+}
+
+impl AppVm {
+    fn new(ctx: &ViewModelContext) -> Self {
+        Self {
+            status: ctx.observable("Waiting".to_string()),
+        }
+    }
+
+    fn view(&self) -> tgui::Element<Self> {
+        Column::new()
+            .child(
+                Button::new(Text::new("Confirm"))
+                    .on_click(Command::new_with_context(|vm, ctx| {
+                        let result = ctx.dialogs().show_message(
+                            MessageDialogOptions::new()
+                                .title("Confirm action")
+                                .description("Proceed with the change?")
+                                .level(MessageDialogLevel::Warning)
+                                .buttons(MessageDialogButtons::YesNo),
+                        );
+
+                        vm.status.set(match result {
+                            Ok(MessageDialogResult::Yes) => "Confirmed".to_string(),
+                            Ok(other) => format!("Dismissed: {other:?}"),
+                            Err(error) => format!("Dialog failed: {error}"),
+                        });
+                    })),
+            )
+            .child(Text::new(self.status.binding()))
+            .into()
+    }
+}
+
+fn main() -> Result<(), tgui::TguiError> {
+    Application::new()
+        .with_view_model(AppVm::new)
+        .root_view(AppVm::view)
+        .run()
+}
+```
+
 ## Core Concepts
 
 Most `tgui` applications follow the same flow:
@@ -256,6 +360,7 @@ Use each primitive for a specific job:
 - `Binding::animated(...)`: declarative transitions for values that should interpolate automatically.
 - `AnimatedValue<T>`: imperative animation targets driven by a controller or timeline.
 - `Command` / `ValueCommand`: event handlers for clicks, focus changes, pointer movement, and input updates.
+- `CommandContext`: runtime services passed into `Command::new_with_context(...)` and `ValueCommand::new_with_context(...)`.
 
 The framework does not require a separate message loop or reducer layer. State changes on `Observable<T>` automatically invalidate the UI and trigger recomposition of the affected bindings during the next frame.
 

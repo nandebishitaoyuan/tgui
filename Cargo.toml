@@ -37,16 +37,22 @@ wgpu = { version = "29", features = ["wgsl"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 arboard = "3.6"
 log = "0.4.29"
+raw-window-handle = "0.6"
+rfd = "0.17"
 winit-win32 = "0.31.0-beta.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = "3.6"
 log = "0.4.29"
+raw-window-handle = "0.6"
+rfd = "0.17"
 winit-appkit = "0.31.0-beta.2"
 
 [target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
 arboard = "3.6"
 log = "0.4.29"
+raw-window-handle = "0.6"
+rfd = "0.17"
 winit-wayland = "0.31.0-beta.2"
 winit-x11 = "0.31.0-beta.2"
 

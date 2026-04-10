@@ -60,6 +60,7 @@
 //! ```
 mod animation;
 mod application;
+mod dialog;
 mod foundation;
 pub mod platform;
 mod rendering;
@@ -93,11 +94,15 @@ pub use animation::{
     PlaybackDirection, Repeat, Transition,
 };
 pub use application::{Application, WindowClosePolicy, WindowRole, WindowSpec};
+pub use dialog::{
+    DialogError, Dialogs, FileDialogOptions, MessageDialogButtons, MessageDialogLevel,
+    MessageDialogOptions, MessageDialogResult,
+};
 pub use foundation::binding::{Binding, Observable, ViewModelContext};
 pub use foundation::color::Color;
 pub use foundation::error::TguiError;
 pub use foundation::event::InputTrigger;
-pub use foundation::view_model::{Command, ValueCommand, ViewModel};
+pub use foundation::view_model::{Command, CommandContext, ValueCommand, ViewModel};
 pub use text::font::FontWeight;
 pub use ui::layout::{
     Align, Axis, Insets, Justify, LayoutStyle, Overflow, ScrollbarStyle, Value, Wrap,
