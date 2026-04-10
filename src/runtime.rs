@@ -1,12 +1,14 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::animation::{
     default_theme_transition, AnimationCoordinator, AnimationEngine, AnimationKey, Transition,
     WindowProperty,
 };
-use crate::application::{ApplicationConfig, ThemeSelection};
+use crate::application::{
+    ApplicationConfig, ThemeSelection, WindowClosePolicy, WindowRole, WindowSetFactory,
+};
 use crate::foundation::binding::{Binding, InvalidationSignal};
 use crate::foundation::color::Color;
 use crate::foundation::error::TguiError;
@@ -28,7 +30,10 @@ use crate::platform::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
 };
 use crate::platform::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use crate::platform::window::{ImePurpose, Theme as WindowTheme, WindowAttributes, WindowId};
+use crate::platform::window::{
+    ImeCapabilities, ImeEnableRequest, ImeHint, ImePurpose, ImeRequest, ImeRequestData,
+    Theme as WindowTheme, WindowAttributes, WindowId,
+};
 use crate::rendering::renderer::{RenderStatus, Renderer};
 use crate::text::font::FontManager;
 use crate::ui::theme::{Theme, ThemeMode};
@@ -135,23 +140,26 @@ impl Runtime {
 pub struct BoundRuntime<VM> {
     event_loop: EventLoop,
     config: ApplicationConfig,
-    view_model: VM,
-    window_bindings: WindowBindings,
-    widget_tree: Option<WidgetTree<VM>>,
-    commands: Vec<WindowCommand<VM>>,
+    view_model: Arc<Mutex<VM>>,
+    windows: Option<WindowSetFactory<VM>>,
+    single_window: Option<SingleWindowSetup<VM>>,
     invalidation: InvalidationSignal,
     animations: AnimationCoordinator,
     #[cfg(all(target_os = "android", feature = "android"))]
     android_app: Option<AndroidApp>,
 }
 
+struct SingleWindowSetup<VM> {
+    window_bindings: WindowBindings,
+    widget_tree: Option<WidgetTree<VM>>,
+    commands: Vec<WindowCommand<VM>>,
+}
+
 impl<VM: ViewModel> BoundRuntime<VM> {
     pub fn new(
         config: ApplicationConfig,
         view_model: VM,
-        window_bindings: WindowBindings,
-        widget_tree: Option<WidgetTree<VM>>,
-        commands: Vec<WindowCommand<VM>>,
+        windows: WindowSetFactory<VM>,
         invalidation: InvalidationSignal,
         animations: AnimationCoordinator,
     ) -> Result<Self, TguiError> {
@@ -159,10 +167,9 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         Ok(Self {
             event_loop,
             config,
-            view_model,
-            window_bindings,
-            widget_tree,
-            commands,
+            view_model: Arc::new(Mutex::new(view_model)),
+            windows: Some(windows),
+            single_window: None,
             invalidation,
             animations,
             #[cfg(all(target_os = "android", feature = "android"))]
@@ -185,10 +192,13 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         Ok(Self {
             event_loop,
             config,
-            view_model,
-            window_bindings,
-            widget_tree,
-            commands,
+            view_model: Arc::new(Mutex::new(view_model)),
+            windows: None,
+            single_window: Some(SingleWindowSetup {
+                window_bindings,
+                widget_tree,
+                commands,
+            }),
             invalidation,
             animations,
             android_app: Some(app),
@@ -210,10 +220,13 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         Ok(Self {
             event_loop,
             config,
-            view_model,
-            window_bindings,
-            widget_tree,
-            commands,
+            view_model: Arc::new(Mutex::new(view_model)),
+            windows: None,
+            single_window: Some(SingleWindowSetup {
+                window_bindings,
+                widget_tree,
+                commands,
+            }),
             invalidation,
             animations,
             #[cfg(all(target_os = "android", feature = "android"))]
@@ -222,11 +235,20 @@ impl<VM: ViewModel> BoundRuntime<VM> {
     }
 
     pub fn run(self) -> Result<(), TguiError> {
-        let (mut event_loop, mut handler) = self.into_parts();
-        event_loop.run_app_on_demand(&mut handler)?;
+        if self.windows.is_some() {
+            let (mut event_loop, mut handler) = self.into_parts();
+            event_loop.run_app_on_demand(&mut handler)?;
 
-        if let Some(error) = handler.error {
-            return Err(error);
+            if let Some(error) = handler.error {
+                return Err(error);
+            }
+        } else {
+            let (mut event_loop, mut handler) = self.into_single_window_parts();
+            event_loop.run_app_on_demand(&mut handler)?;
+
+            if let Some(error) = handler.error {
+                return Err(error);
+            }
         }
 
         Ok(())
@@ -243,8 +265,9 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         animations: AnimationCoordinator,
     ) -> BoundRuntimeHandler<VM> {
         BoundRuntimeHandler::new(
+            WindowRole::Main,
             config,
-            view_model,
+            Arc::new(Mutex::new(view_model)),
             window_bindings,
             widget_tree,
             commands,
@@ -255,13 +278,28 @@ impl<VM: ViewModel> BoundRuntime<VM> {
         )
     }
 
-    fn into_parts(self) -> (EventLoop, BoundRuntimeHandler<VM>) {
-        let handler = BoundRuntimeHandler::new(
+    fn into_parts(self) -> (EventLoop, MultiWindowHandler<VM>) {
+        let handler = MultiWindowHandler::new(
             self.config,
             self.view_model,
-            self.window_bindings,
-            self.widget_tree,
-            self.commands,
+            self.windows.expect("desktop runtime requires a window factory"),
+            self.invalidation,
+            self.animations,
+        );
+        (self.event_loop, handler)
+    }
+
+    fn into_single_window_parts(self) -> (EventLoop, BoundRuntimeHandler<VM>) {
+        let single_window = self
+            .single_window
+            .expect("single-window runtime requires a window definition");
+        let handler = BoundRuntimeHandler::new(
+            WindowRole::Main,
+            self.config,
+            self.view_model,
+            single_window.window_bindings,
+            single_window.widget_tree,
+            single_window.commands,
             self.invalidation,
             self.animations,
             #[cfg(all(target_os = "android", feature = "android"))]
@@ -297,7 +335,7 @@ fn build_event_loop_with_ohos_app(
     Ok(event_loop)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WindowBindings {
     pub(crate) title: Option<Binding<String>>,
     pub(crate) clear_color: Option<Binding<Color>>,
@@ -307,6 +345,15 @@ pub struct WindowBindings {
 pub struct WindowCommand<VM> {
     pub(crate) trigger: InputTrigger,
     pub(crate) command: Command<VM>,
+}
+
+impl<VM> Clone for WindowCommand<VM> {
+    fn clone(&self) -> Self {
+        Self {
+            trigger: self.trigger,
+            command: self.command.clone(),
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -473,14 +520,17 @@ impl RuntimeHandler {
 
 #[doc(hidden)]
 pub struct BoundRuntimeHandler<VM> {
+    role: WindowRole,
     config: ApplicationConfig,
     font_manager: FontManager,
     theme: Theme,
-    view_model: VM,
+    view_model: Arc<Mutex<VM>>,
     window_bindings: WindowBindings,
     widget_tree: Option<WidgetTree<VM>>,
     commands: Vec<WindowCommand<VM>>,
+    close_policy: WindowClosePolicy,
     invalidation: InvalidationSignal,
+    last_invalidation_revision: u64,
     animations: AnimationCoordinator,
     animation_engine: AnimationEngine,
     animation_epoch: u64,
@@ -596,8 +646,9 @@ impl ClipboardService {
 
 impl<VM> BoundRuntimeHandler<VM> {
     fn new(
+        role: WindowRole,
         config: ApplicationConfig,
-        view_model: VM,
+        view_model: Arc<Mutex<VM>>,
         window_bindings: WindowBindings,
         widget_tree: Option<WidgetTree<VM>>,
         commands: Vec<WindowCommand<VM>>,
@@ -611,6 +662,7 @@ impl<VM> BoundRuntimeHandler<VM> {
             ThemeSelection::System => Theme::default(),
         };
         Self {
+            role,
             config,
             font_manager,
             theme,
@@ -618,7 +670,9 @@ impl<VM> BoundRuntimeHandler<VM> {
             window_bindings,
             widget_tree,
             commands,
+            close_policy: WindowClosePolicy::Close,
             invalidation,
+            last_invalidation_revision: 0,
             animations,
             animation_engine: AnimationEngine::default(),
             animation_epoch: 0,
@@ -645,6 +699,46 @@ impl<VM> BoundRuntimeHandler<VM> {
             #[cfg(all(target_os = "android", feature = "android"))]
             system_bar_style: None,
         }
+    }
+
+    fn with_view_model<R>(&self, f: impl FnOnce(&mut VM) -> R) -> R {
+        let mut view_model = self.view_model.lock().expect("view model lock poisoned");
+        f(&mut view_model)
+    }
+
+    fn set_definition(
+        &mut self,
+        role: WindowRole,
+        config: ApplicationConfig,
+        window_bindings: WindowBindings,
+        commands: Vec<WindowCommand<VM>>,
+        close_policy: WindowClosePolicy,
+    ) {
+        self.role = role;
+        let font_manager = FontManager::new(&config.fonts);
+        self.config = config;
+        self.font_manager = font_manager;
+        self.window_bindings = window_bindings;
+        self.commands = commands;
+        self.close_policy = close_policy;
+        self.invalidate_scene();
+    }
+
+    fn close_policy(&self) -> WindowClosePolicy {
+        self.close_policy
+    }
+
+    fn is_main_window(&self) -> bool {
+        matches!(self.role, WindowRole::Main)
+    }
+
+    fn blocks_main_window(&self) -> bool {
+        matches!(
+            self.role,
+            WindowRole::Child {
+                blocks_main_window: true
+            }
+        )
     }
 
     fn fail(&mut self, event_loop: &dyn ActiveEventLoop, error: TguiError) {
@@ -752,7 +846,9 @@ impl<VM> BoundRuntimeHandler<VM> {
     }
 
     fn request_redraw_if_dirty(&mut self, now: Instant) {
-        if self.invalidation.take_dirty() {
+        let revision = self.invalidation.revision();
+        if revision != self.last_invalidation_revision {
+            self.last_invalidation_revision = revision;
             self.invalidate_scene();
             self.sync_bindings(now);
 
@@ -843,14 +939,9 @@ impl<VM> BoundRuntimeHandler<VM> {
         self.sync_bindings(Instant::now());
         let rendered = self.render_primitives();
         if let (Some(window), Some(caret_rect)) = (self.window.as_ref(), rendered.ime_cursor_area) {
-            window.set_ime_cursor_area(
-                PhysicalPosition::new(caret_rect.x as i32, caret_rect.y as i32).into(),
-                PhysicalSize::new(
-                    caret_rect.width.ceil().max(1.0) as u32,
-                    caret_rect.height.ceil().max(1.0) as u32,
-                )
-                .into(),
-            );
+            let _ = window.request_ime_update(ImeRequest::Update(Self::ime_cursor_request_data(
+                caret_rect,
+            )));
         }
         let renderer = self
             .renderer
@@ -892,7 +983,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         self.cursor_position = None;
         for hovered in std::mem::take(&mut self.hovered_widgets).into_iter().rev() {
             if let Some(command) = hovered.on_mouse_leave {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 self.invalidate_scene();
                 self.invalidation.mark_dirty();
             }
@@ -1139,7 +1230,7 @@ impl<VM> BoundRuntimeHandler<VM> {
 
         if let Some(pending) = self.pending_click.take() {
             if let Some(command) = pending.command {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 self.invalidate_scene();
                 self.invalidation.mark_dirty();
             }
@@ -1155,13 +1246,37 @@ impl<VM> BoundRuntimeHandler<VM> {
         self.widget_tree.as_ref()?.input_snapshot(id)
     }
 
-    fn sync_ime_allowed(&self) {
-        if let Some(window) = self.window.as_ref() {
-            let ime_allowed = self.focused_input.is_some();
-            window.set_ime_allowed(ime_allowed);
-            if ime_allowed {
-                window.set_ime_purpose(ImePurpose::Normal);
-            }
+    fn ime_cursor_request_data(caret_rect: Rect) -> ImeRequestData {
+        ImeRequestData::default().with_cursor_area(
+            PhysicalPosition::new(caret_rect.x as i32, caret_rect.y as i32).into(),
+            PhysicalSize::new(
+                caret_rect.width.ceil().max(1.0) as u32,
+                caret_rect.height.ceil().max(1.0) as u32,
+            )
+            .into(),
+        )
+    }
+
+    fn ime_enable_request(&mut self) -> Option<ImeEnableRequest> {
+        let request_data = Self::ime_cursor_request_data(self.render_primitives().ime_cursor_area?)
+            .with_hint_and_purpose(ImeHint::NONE, ImePurpose::Normal);
+        ImeEnableRequest::new(
+            ImeCapabilities::new()
+                .with_cursor_area()
+                .with_hint_and_purpose(),
+            request_data,
+        )
+    }
+
+    fn sync_ime_allowed(&mut self) {
+        let request = if self.focused_input.is_some() {
+            self.ime_enable_request().map(ImeRequest::Enable)
+        } else {
+            Some(ImeRequest::Disable)
+        };
+
+        if let (Some(window), Some(request)) = (self.window.as_ref(), request) {
+            let _ = window.request_ime_update(request);
         }
     }
 
@@ -1220,7 +1335,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         self.reset_caret_blink(Instant::now());
 
         if let Some(command) = snapshot.on_change.clone() {
-            command.execute(&mut self.view_model, new_text);
+            self.with_view_model(|view_model| command.execute(view_model, new_text));
             self.invalidation.mark_dirty();
         }
 
@@ -1513,7 +1628,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         let previous_hovered = std::mem::take(&mut self.hovered_widgets);
         for previous in previous_hovered[prefix_len..].iter().rev() {
             if let Some(command) = previous.on_mouse_leave.clone() {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 self.invalidate_scene();
                 self.invalidation.mark_dirty();
             }
@@ -1521,7 +1636,7 @@ impl<VM> BoundRuntimeHandler<VM> {
 
         for hovered in next_hovered[prefix_len..].iter() {
             if let Some(command) = hovered.on_mouse_enter.clone() {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 self.invalidate_scene();
                 self.invalidation.mark_dirty();
             }
@@ -1530,7 +1645,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         if let Some(position) = cursor_position {
             for hovered in &next_hovered {
                 if let Some(command) = hovered.on_mouse_move.clone() {
-                    command.execute(&mut self.view_model, position);
+                    self.with_view_model(|view_model| command.execute(view_model, position));
                     self.invalidate_scene();
                     self.invalidation.mark_dirty();
                 }
@@ -1794,7 +1909,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         let mut fired_handler = false;
         if let Some(previous) = self.focused_widget.take() {
             if let Some(command) = previous.on_blur {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 fired_handler = true;
             }
         }
@@ -1809,7 +1924,7 @@ impl<VM> BoundRuntimeHandler<VM> {
 
         if let Some(command) = on_focus {
             if next_id.is_some() {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 fired_handler = true;
             }
         }
@@ -1878,7 +1993,7 @@ impl<VM> BoundRuntimeHandler<VM> {
         if is_double_click {
             self.pending_click = None;
             if let Some(command) = interactions.on_double_click.or(interactions.on_click) {
-                command.execute(&mut self.view_model);
+                self.with_view_model(|view_model| command.execute(view_model));
                 self.invalidate_scene();
                 self.invalidation.mark_dirty();
             }
@@ -1892,11 +2007,567 @@ impl<VM> BoundRuntimeHandler<VM> {
                 command: interactions.on_click,
             });
         } else if let Some(command) = interactions.on_click {
-            command.execute(&mut self.view_model);
+            self.with_view_model(|view_model| command.execute(view_model));
             self.invalidate_scene();
             self.invalidation.mark_dirty();
         } else {
             self.pending_click = None;
+        }
+    }
+
+    fn window_id(&self) -> Option<WindowId> {
+        self.window_id
+    }
+
+    fn create_or_resume_surface(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if self.window.is_some() && self.renderer.is_some() {
+            return;
+        }
+
+        if self.window.is_some() {
+            self.resume_existing_window(event_loop);
+            return;
+        }
+
+        let attributes = WindowAttributes::default()
+            .with_transparent(!cfg!(all(target_env = "ohos", feature = "ohos")))
+            .with_title(self.config.title.clone())
+            .with_surface_size(self.config.size)
+            .with_visible(false);
+
+        let window: Arc<dyn Window> = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::from(window),
+            Err(error) => {
+                self.fail(event_loop, error.into());
+                return;
+            }
+        };
+
+        self.theme = resolve_theme(
+            &self.active_theme_selection(),
+            resolve_window_theme(
+                Some(window.as_ref()),
+                #[cfg(all(target_os = "android", feature = "android"))]
+                self.android_app.as_ref(),
+            ),
+        );
+        #[cfg(all(target_os = "android", feature = "android"))]
+        {
+            let theme = self.theme.clone();
+            self.sync_system_bar_style(&theme);
+        }
+        let clear_color =
+            if self.window_bindings.clear_color.is_some() || self.config.clear_color_overridden {
+                self.config.clear_color
+            } else {
+                self.theme.palette.window_background
+            };
+
+        let renderer = match Renderer::new(window.clone(), clear_color, &self.config.fonts) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
+
+        self.window_id = Some(window.id());
+        self.renderer = Some(renderer);
+        self.window = Some(window);
+
+        if !self.render_hidden_frame(event_loop) {
+            return;
+        }
+
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+            window.set_visible(true);
+        }
+    }
+
+    fn handle_bound_window_event(
+        &mut self,
+        event_loop: &dyn ActiveEventLoop,
+        event: WindowEvent,
+    ) -> bool {
+        if let WindowEvent::PointerMoved { position, .. } = &event {
+            self.set_pointer_position(*position);
+        }
+
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            self.modifiers = modifiers.state();
+        }
+
+        if matches!(event, WindowEvent::PointerLeft { .. }) {
+            self.clear_pointer_position();
+        }
+
+        if Self::should_dispatch_widget_event(&event) {
+            let viewport = self.viewport_rect();
+            let previous_focus = self.focused_input;
+
+            match &event {
+                WindowEvent::PointerMoved { .. } => {
+                    if self.active_scrollbar_drag.is_some() {
+                        self.handle_scrollbar_drag();
+                        self.sync_scrollbar_hover();
+                        self.update_cursor_icon();
+                    } else {
+                        self.handle_hover(viewport);
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    self.handle_mouse_wheel(*delta);
+                }
+                WindowEvent::PointerButton {
+                    state: ElementState::Pressed,
+                    position,
+                    button,
+                    ..
+                } => {
+                    if button.clone().mouse_button() == Some(MouseButton::Left) {
+                        self.set_pointer_position(*position);
+                        if !self.begin_scrollbar_drag() {
+                            self.handle_mouse_press(viewport, Instant::now());
+                        } else {
+                            self.update_cursor_icon();
+                        }
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    self.handle_input_keyboard_event(event);
+                }
+                _ => {}
+            }
+
+            if self.focused_input != previous_focus {
+                self.invalidate_scene();
+            }
+
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+
+        if let Some(window_command) = self
+            .commands
+            .iter()
+            .find(|entry| entry.trigger.matches(&event))
+        {
+            self.with_view_model(|view_model| window_command.command.execute(view_model));
+            self.invalidate_scene();
+            self.invalidation.mark_dirty();
+        }
+
+        match event {
+            WindowEvent::CloseRequested => return self.close_policy() == WindowClosePolicy::Close,
+            WindowEvent::Focused(false) => {
+                self.end_scrollbar_drag();
+                self.update_focus(None, None, None, None);
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ThemeChanged(theme) => {
+                self.apply_window_theme(Some(theme));
+                self.sync_bindings(Instant::now());
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.apply_window_theme(None);
+                self.invalidate_scene();
+                if let Some(window) = self.window.as_ref() {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.resize(window.surface_size());
+                    }
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                self.handle_input_ime(ime);
+            }
+            WindowEvent::PointerButton {
+                state: ElementState::Released,
+                position,
+                button,
+                ..
+            } => {
+                if button.clone().mouse_button() == Some(MouseButton::Left) {
+                    self.set_pointer_position(position);
+                    self.end_scrollbar_drag();
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::SurfaceResized(size) => {
+                self.invalidate_scene();
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(size);
+                }
+
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::RedrawRequested => match self.render_current_frame() {
+                Ok(RenderStatus::Rendered | RenderStatus::SkipFrame) => {}
+                Ok(RenderStatus::ReconfigureSurface) => {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.reconfigure();
+                    }
+                    match self.render_current_frame() {
+                        Ok(RenderStatus::Rendered | RenderStatus::SkipFrame) => {}
+                        Ok(RenderStatus::ReconfigureSurface) => {}
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                }
+                Err(error) => self.fail(event_loop, error),
+            },
+            _ => {}
+        }
+
+        false
+    }
+
+    fn handle_bound_about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let now = Instant::now();
+        let theme_changed = self.refresh_platform_theme();
+        if theme_changed {
+            self.sync_bindings(now);
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+        self.request_redraw_if_dirty(now);
+        #[cfg(all(target_os = "android", feature = "android"))]
+        let animation_frame_advanced = self.drive_animations(event_loop, now);
+        #[cfg(not(all(target_os = "android", feature = "android")))]
+        self.drive_animations(event_loop, now);
+        #[cfg(all(target_os = "android", feature = "android"))]
+        if theme_changed || animation_frame_advanced {
+            self.render_immediately(event_loop);
+        }
+    }
+}
+
+struct ResolvedWindowSpec<VM> {
+    key: String,
+    role: WindowRole,
+    config: ApplicationConfig,
+    window_bindings: WindowBindings,
+    widget_tree: Option<WidgetTree<VM>>,
+    commands: Vec<WindowCommand<VM>>,
+    close_policy: WindowClosePolicy,
+}
+
+struct MultiWindowHandler<VM> {
+    config: ApplicationConfig,
+    view_model: Arc<Mutex<VM>>,
+    windows: WindowSetFactory<VM>,
+    invalidation: InvalidationSignal,
+    animations: AnimationCoordinator,
+    windows_by_key: HashMap<String, BoundRuntimeHandler<VM>>,
+    window_keys_by_id: HashMap<WindowId, String>,
+    closed_window_keys: HashSet<String>,
+    last_window_sync_revision: u64,
+    windows_need_sync: bool,
+    shutting_down: bool,
+    error: Option<TguiError>,
+}
+
+impl<VM: ViewModel> MultiWindowHandler<VM> {
+    fn new(
+        config: ApplicationConfig,
+        view_model: Arc<Mutex<VM>>,
+        windows: WindowSetFactory<VM>,
+        invalidation: InvalidationSignal,
+        animations: AnimationCoordinator,
+    ) -> Self {
+        Self {
+            config,
+            view_model,
+            windows,
+            invalidation,
+            animations,
+            windows_by_key: HashMap::new(),
+            window_keys_by_id: HashMap::new(),
+            closed_window_keys: HashSet::new(),
+            last_window_sync_revision: 0,
+            windows_need_sync: true,
+            shutting_down: false,
+            error: None,
+        }
+    }
+
+    fn fail(&mut self, event_loop: &dyn ActiveEventLoop, error: TguiError) {
+        eprintln!("tgui multi-window runtime failed: {error}");
+        self.error = Some(error);
+        event_loop.exit();
+    }
+
+    fn resolve_windows(&self) -> Result<Vec<ResolvedWindowSpec<VM>>, TguiError> {
+        let view_model = self.view_model.lock().expect("view model lock poisoned");
+        let specs = (self.windows.factory)(&view_model);
+        let mut keys = HashSet::new();
+        let mut main_window_count = 0usize;
+        let mut resolved = Vec::with_capacity(specs.len());
+
+        for spec in specs {
+            let key = spec.key.clone();
+            if !keys.insert(key.clone()) {
+                return Err(TguiError::Unsupported(format!(
+                    "window factory returned a duplicate window key: {key}"
+                )));
+            }
+
+            if matches!(spec.role, WindowRole::Main) {
+                main_window_count += 1;
+            }
+
+            let widget_tree = if self.windows_by_key.contains_key(&key) {
+                None
+            } else {
+                spec.build_widget_tree(&view_model)
+            };
+
+            resolved.push(ResolvedWindowSpec {
+                key,
+                role: spec.role,
+                config: spec.resolved_config(&self.config),
+                window_bindings: spec.build_window_bindings(&view_model),
+                widget_tree,
+                commands: spec.commands,
+                close_policy: spec.close_policy,
+            });
+        }
+
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+
+        if main_window_count != 1 {
+            return Err(TguiError::Unsupported(format!(
+                "multi-window applications must declare exactly one main window, found {main_window_count}"
+            )));
+        }
+
+        Ok(resolved)
+    }
+
+    fn main_window_is_blocked(&self) -> bool {
+        self.windows_by_key
+            .values()
+            .any(BoundRuntimeHandler::blocks_main_window)
+    }
+
+    fn should_gate_main_window_event(event: &WindowEvent) -> bool {
+        matches!(
+            event,
+            WindowEvent::PointerMoved { .. }
+                | WindowEvent::PointerLeft { .. }
+                | WindowEvent::PointerButton { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::Ime(_)
+                | WindowEvent::ModifiersChanged(_)
+        )
+    }
+
+    fn sync_windows(&mut self, event_loop: &dyn ActiveEventLoop, force: bool) {
+        if self.shutting_down {
+            return;
+        }
+
+        let revision = self.invalidation.revision();
+        if !force
+            && !self.windows_need_sync
+            && !self.windows_by_key.is_empty()
+            && revision == self.last_window_sync_revision
+        {
+            return;
+        }
+
+        let resolved = match self.resolve_windows() {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
+
+        let desired_keys: HashSet<String> = resolved.iter().map(|window| window.key.clone()).collect();
+        self.closed_window_keys.retain(|key| desired_keys.contains(key));
+
+        for resolved_window in resolved {
+            if self.closed_window_keys.contains(&resolved_window.key) {
+                continue;
+            }
+
+            let key = resolved_window.key.clone();
+            if let Some(window) = self.windows_by_key.get_mut(&key) {
+                window.set_definition(
+                    resolved_window.role,
+                    resolved_window.config,
+                    resolved_window.window_bindings,
+                    resolved_window.commands,
+                    resolved_window.close_policy,
+                );
+                window.create_or_resume_surface(event_loop);
+                if let Some(error) = window.error.take() {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                self.window_keys_by_id.retain(|_, existing_key| existing_key != &key);
+                if let Some(window_id) = window.window_id() {
+                    self.window_keys_by_id.insert(window_id, key);
+                }
+            } else {
+                let mut window = BoundRuntimeHandler::new(
+                    resolved_window.role,
+                    resolved_window.config,
+                    self.view_model.clone(),
+                    resolved_window.window_bindings,
+                    resolved_window.widget_tree,
+                    resolved_window.commands,
+                    self.invalidation.clone(),
+                    self.animations.clone(),
+                    #[cfg(all(target_os = "android", feature = "android"))]
+                    None,
+                );
+                window.close_policy = resolved_window.close_policy;
+                window.create_or_resume_surface(event_loop);
+                if let Some(error) = window.error.take() {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                if let Some(window_id) = window.window_id() {
+                    self.window_keys_by_id.insert(window_id, key.clone());
+                }
+                self.windows_by_key.insert(key, window);
+            }
+        }
+
+        let stale_keys: Vec<String> = self
+            .windows_by_key
+            .keys()
+            .filter(|key| {
+                !desired_keys.contains(*key) || self.closed_window_keys.contains(key.as_str())
+            })
+            .cloned()
+            .collect();
+
+        for key in stale_keys {
+            self.remove_window(&key);
+        }
+
+        if self.windows_by_key.is_empty() {
+            event_loop.exit();
+        }
+
+        self.last_window_sync_revision = revision;
+        self.windows_need_sync = false;
+    }
+
+    fn remove_window(&mut self, key: &str) {
+        if let Some(window) = self.windows_by_key.remove(key) {
+            if let Some(window_id) = window.window_id() {
+                self.window_keys_by_id.remove(&window_id);
+            }
+        }
+    }
+}
+
+impl<VM: ViewModel> ApplicationHandler for MultiWindowHandler<VM> {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.sync_windows(event_loop, true);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &dyn ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(key) = self.window_keys_by_id.get(&window_id).cloned() else {
+            return;
+        };
+
+        let is_main_window = self
+            .windows_by_key
+            .get(&key)
+            .map(BoundRuntimeHandler::is_main_window)
+            .unwrap_or(false);
+
+        if is_main_window
+            && self.main_window_is_blocked()
+            && Self::should_gate_main_window_event(&event)
+        {
+            return;
+        }
+
+        let close_requested = self
+            .windows_by_key
+            .get_mut(&key)
+            .map(|window| window.handle_bound_window_event(event_loop, event))
+            .unwrap_or(false);
+
+        if let Some(window) = self.windows_by_key.get_mut(&key) {
+            if let Some(error) = window.error.take() {
+                self.fail(event_loop, error);
+                return;
+            }
+        }
+
+        if close_requested {
+            if is_main_window && self.config.close_children_with_main {
+                self.shutting_down = true;
+                self.windows_by_key.clear();
+                self.window_keys_by_id.clear();
+                event_loop.exit();
+                return;
+            }
+
+            self.closed_window_keys.insert(key.clone());
+            self.remove_window(&key);
+            if self.windows_by_key.is_empty() {
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if self.shutting_down {
+            event_loop.exit();
+            return;
+        }
+
+        self.sync_windows(event_loop, false);
+        if self.error.is_some() {
+            return;
+        }
+
+        let keys: Vec<String> = self.windows_by_key.keys().cloned().collect();
+        for key in keys {
+            if let Some(window) = self.windows_by_key.get_mut(&key) {
+                window.handle_bound_about_to_wait(event_loop);
+                if let Some(error) = window.error.take() {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                self.window_keys_by_id.retain(|_, existing_key| existing_key != &key);
+                if let Some(window_id) = window.window_id() {
+                    self.window_keys_by_id.insert(window_id, key.clone());
+                }
+            }
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        for window in self.windows_by_key.values_mut() {
+            window.suspend();
         }
     }
 }
@@ -2030,65 +2701,7 @@ impl ApplicationHandler for RuntimeHandler {
 
 impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        if self.window.is_some() {
-            self.resume_existing_window(event_loop);
-            return;
-        }
-
-        let attributes = WindowAttributes::default()
-            .with_transparent(!cfg!(all(target_env = "ohos", feature = "ohos")))
-            .with_title(self.config.title.clone())
-            .with_surface_size(self.config.size)
-            .with_visible(false);
-
-        let window: Arc<dyn Window> = match event_loop.create_window(attributes) {
-            Ok(window) => Arc::from(window),
-            Err(error) => {
-                self.fail(event_loop, error.into());
-                return;
-            }
-        };
-
-        self.theme = resolve_theme(
-            &self.active_theme_selection(),
-            resolve_window_theme(
-                Some(window.as_ref()),
-                #[cfg(all(target_os = "android", feature = "android"))]
-                self.android_app.as_ref(),
-            ),
-        );
-        #[cfg(all(target_os = "android", feature = "android"))]
-        {
-            let theme = self.theme.clone();
-            self.sync_system_bar_style(&theme);
-        }
-        let clear_color =
-            if self.window_bindings.clear_color.is_some() || self.config.clear_color_overridden {
-                self.config.clear_color
-            } else {
-                self.theme.palette.window_background
-            };
-
-        let renderer = match Renderer::new(window.clone(), clear_color, &self.config.fonts) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                self.fail(event_loop, error);
-                return;
-            }
-        };
-
-        self.window_id = Some(window.id());
-        self.renderer = Some(renderer);
-        self.window = Some(window);
-
-        if !self.render_hidden_frame(event_loop) {
-            return;
-        }
-
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-            window.set_visible(true);
-        }
+        self.create_or_resume_surface(event_loop);
     }
 
     fn window_event(
@@ -2101,164 +2714,13 @@ impl<VM: ViewModel> ApplicationHandler for BoundRuntimeHandler<VM> {
             return;
         }
 
-        if let WindowEvent::PointerMoved { position, .. } = &event {
-            self.set_pointer_position(*position);
-        }
-
-        if let WindowEvent::ModifiersChanged(modifiers) = &event {
-            self.modifiers = modifiers.state();
-        }
-
-        if matches!(event, WindowEvent::PointerLeft { .. }) {
-            self.clear_pointer_position();
-        }
-
-        if Self::should_dispatch_widget_event(&event) {
-            let viewport = self.viewport_rect();
-            let previous_focus = self.focused_input;
-
-            match &event {
-                WindowEvent::PointerMoved { .. } => {
-                    if self.active_scrollbar_drag.is_some() {
-                        self.handle_scrollbar_drag();
-                        self.sync_scrollbar_hover();
-                        self.update_cursor_icon();
-                    } else {
-                        self.handle_hover(viewport);
-                    }
-                }
-                WindowEvent::MouseWheel { delta, .. } => {
-                    self.handle_mouse_wheel(*delta);
-                }
-                WindowEvent::PointerButton {
-                    state: ElementState::Pressed,
-                    position,
-                    button,
-                    ..
-                } => {
-                    if button.clone().mouse_button() == Some(MouseButton::Left) {
-                        self.set_pointer_position(*position);
-                        if !self.begin_scrollbar_drag() {
-                            self.handle_mouse_press(viewport, Instant::now());
-                        } else {
-                            self.update_cursor_icon();
-                        }
-                    }
-                }
-                WindowEvent::KeyboardInput { event, .. } => {
-                    self.handle_input_keyboard_event(event);
-                }
-                _ => {}
-            }
-
-            if self.focused_input != previous_focus {
-                self.invalidate_scene();
-            }
-
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
-            }
-        }
-
-        if let Some(window_command) = self
-            .commands
-            .iter()
-            .find(|entry| entry.trigger.matches(&event))
-        {
-            window_command.command.execute(&mut self.view_model);
-            self.invalidate_scene();
-            self.invalidation.mark_dirty();
-        }
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Focused(false) => {
-                self.end_scrollbar_drag();
-                self.update_focus(None, None, None, None);
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::ThemeChanged(theme) => {
-                self.apply_window_theme(Some(theme));
-                self.sync_bindings(Instant::now());
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::ScaleFactorChanged { .. } => {
-                self.apply_window_theme(None);
-                self.invalidate_scene();
-                if let Some(window) = self.window.as_ref() {
-                    if let Some(renderer) = self.renderer.as_mut() {
-                        renderer.resize(window.surface_size());
-                    }
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::Ime(ime) => {
-                self.handle_input_ime(ime);
-            }
-            WindowEvent::PointerButton {
-                state: ElementState::Released,
-                position,
-                button,
-                ..
-            } => {
-                if button.clone().mouse_button() == Some(MouseButton::Left) {
-                    self.set_pointer_position(position);
-                    self.end_scrollbar_drag();
-                    if let Some(window) = self.window.as_ref() {
-                        window.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::SurfaceResized(size) => {
-                self.invalidate_scene();
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(size);
-                }
-
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::RedrawRequested => match self.render_current_frame() {
-                Ok(RenderStatus::Rendered | RenderStatus::SkipFrame) => {}
-                Ok(RenderStatus::ReconfigureSurface) => {
-                    if let Some(renderer) = self.renderer.as_mut() {
-                        renderer.reconfigure();
-                    }
-                    match self.render_current_frame() {
-                        Ok(RenderStatus::Rendered | RenderStatus::SkipFrame) => {}
-                        Ok(RenderStatus::ReconfigureSurface) => {}
-                        Err(error) => self.fail(event_loop, error),
-                    }
-                }
-                Err(error) => self.fail(event_loop, error),
-            },
-            _ => {}
+        if self.handle_bound_window_event(event_loop, event) {
+            event_loop.exit();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
-        let now = Instant::now();
-        let theme_changed = self.refresh_platform_theme();
-        if theme_changed {
-            self.sync_bindings(now);
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
-            }
-        }
-        self.request_redraw_if_dirty(now);
-        #[cfg(all(target_os = "android", feature = "android"))]
-        let animation_frame_advanced = self.drive_animations(event_loop, now);
-        #[cfg(not(all(target_os = "android", feature = "android")))]
-        self.drive_animations(event_loop, now);
-        #[cfg(all(target_os = "android", feature = "android"))]
-        if theme_changed || animation_frame_advanced {
-            self.render_immediately(event_loop);
-        }
+        self.handle_bound_about_to_wait(event_loop);
     }
 
     fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {

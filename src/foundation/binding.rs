@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::animation::{
@@ -7,22 +7,22 @@ use crate::animation::{
 
 #[derive(Clone, Default)]
 pub(crate) struct InvalidationSignal {
-    dirty: Arc<AtomicBool>,
+    revision: Arc<AtomicU64>,
 }
 
 impl InvalidationSignal {
     pub(crate) fn new() -> Self {
         Self {
-            dirty: Arc::new(AtomicBool::new(true)),
+            revision: Arc::new(AtomicU64::new(1)),
         }
     }
 
     pub(crate) fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::SeqCst);
+        self.revision.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub(crate) fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::SeqCst)
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::SeqCst)
     }
 }
 

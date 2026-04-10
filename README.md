@@ -24,6 +24,7 @@ This project is under active development.
   - fixed theme or bound `ThemeMode`
   - bound window title and clear color
   - global keyboard / mouse input bindings
+  - desktop multi-window reconciliation driven by shared view-model state
 - MVVM primitives:
   - `Observable<T>`
   - `Binding<T>`
@@ -196,6 +197,43 @@ fn main() -> Result<(), tgui::TguiError> {
         .with_view_model(CounterVm::new)
         .bind_title(CounterVm::title)
         .root_view(CounterVm::view)
+        .run()
+}
+```
+
+### Desktop Multi-Window
+
+On desktop targets, one shared view model can reconcile one main window plus multiple child windows:
+
+```rust
+use tgui::{Application, Text, ViewModelContext, WindowSpec};
+
+struct AppVm;
+
+impl AppVm {
+    fn new(_: &ViewModelContext) -> Self {
+        Self
+    }
+
+    fn windows(&self) -> Vec<WindowSpec<Self>> {
+        vec![
+            WindowSpec::main("main")
+                .title("Main")
+                .window_size(960, 640)
+                .root_view(|_| Text::new("Main window").into()),
+            WindowSpec::child("inspector")
+                .title("Inspector")
+                .window_size(420, 320)
+                .root_view(|_| Text::new("Inspector").into()),
+        ]
+    }
+}
+
+fn main() -> Result<(), tgui::TguiError> {
+    Application::new()
+        .close_children_with_main(true)
+        .with_view_model(AppVm::new)
+        .windows(AppVm::windows)
         .run()
 }
 ```
@@ -620,6 +658,7 @@ Available examples in this repository:
 - `scroll`
 - `layout_theme_showcase`
 - `widgets_showcase`
+- `multi_window`
 - `android_basic_window`
 - `ohos_basic_window`
 
@@ -639,6 +678,7 @@ cargo run --manifest-path examples/layout/Cargo.toml
 cargo run --manifest-path examples/scroll/Cargo.toml
 cargo run --manifest-path examples/layout_theme_showcase/Cargo.toml
 cargo run --manifest-path examples/widgets_showcase/Cargo.toml
+cargo run --manifest-path examples/multi_window/Cargo.toml
 ```
 
 Build the Android example with:

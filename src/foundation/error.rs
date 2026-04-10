@@ -10,6 +10,7 @@ pub enum TguiError {
     RequestAdapter(wgpu::RequestAdapterError),
     RequestDevice(wgpu::RequestDeviceError),
     NoSurfaceFormat,
+    Unsupported(String),
     TextRender(String),
 }
 
@@ -25,6 +26,7 @@ impl Display for TguiError {
             Self::NoSurfaceFormat => {
                 write!(f, "surface does not expose a compatible texture format")
             }
+            Self::Unsupported(message) => write!(f, "{message}"),
             Self::TextRender(error) => write!(f, "failed to render text: {error}"),
         }
     }

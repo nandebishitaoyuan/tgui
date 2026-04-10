@@ -46,6 +46,17 @@ struct TextSprite {
     clip_rect: Option<Rect>,
 }
 
+struct PrimitiveBatch {
+    clip_rect: Option<Rect>,
+    vertex_range: std::ops::Range<u32>,
+}
+
+struct TextBatch {
+    bind_group: wgpu::BindGroup,
+    clip_rect: Option<Rect>,
+    vertex_range: std::ops::Range<u32>,
+}
+
 struct TextCacheEntry {
     key: TextCacheKey,
     bind_group: wgpu::BindGroup,
@@ -304,6 +315,16 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let (shape_vertices, shape_batches) = self.rect_batches_for(&scene.shapes);
+        let shape_vertex_buffer = (!shape_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tgui-rect-vertices"),
+                    contents: bytemuck::cast_slice(&shape_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+
         let text_sprites = scene
             .texts
             .iter()
@@ -323,6 +344,37 @@ impl Renderer {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        let mut text_vertices = Vec::with_capacity(text_sprites.len() * 6);
+        let mut text_batches = Vec::with_capacity(text_sprites.len());
+        for sprite in text_sprites {
+            let start = text_vertices.len() as u32;
+            text_vertices.extend_from_slice(&sprite.vertices);
+            let end = text_vertices.len() as u32;
+            text_batches.push(TextBatch {
+                bind_group: sprite.bind_group,
+                clip_rect: sprite.clip_rect,
+                vertex_range: start..end,
+            });
+        }
+        let text_vertex_buffer = (!text_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tgui-text-vertices"),
+                    contents: bytemuck::cast_slice(&text_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+
+        let (overlay_vertices, overlay_batches) = self.rect_batches_for(&scene.overlay_shapes);
+        let overlay_vertex_buffer = (!overlay_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tgui-overlay-vertices"),
+                    contents: bytemuck::cast_slice(&overlay_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
 
         let mut encoder = self
             .device
@@ -349,29 +401,24 @@ impl Renderer {
             });
 
             pass.set_pipeline(&self.rect_pipeline);
-            self.draw_rect_primitives(&mut pass, &scene.shapes);
+            self.draw_rect_batches(&mut pass, shape_vertex_buffer.as_ref(), &shape_batches);
 
-            if !text_sprites.is_empty() {
+            if !text_batches.is_empty() {
                 pass.set_pipeline(&self.text_pipeline);
-                for sprite in &text_sprites {
-                    if !self.apply_scissor(&mut pass, sprite.clip_rect) {
+                if let Some(vertex_buffer) = text_vertex_buffer.as_ref() {
+                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                }
+                for batch in &text_batches {
+                    if !self.apply_scissor(&mut pass, batch.clip_rect) {
                         continue;
                     }
-                    let vertex_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("tgui-text-vertices"),
-                                contents: bytemuck::cast_slice(&sprite.vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
-                    pass.set_bind_group(0, &sprite.bind_group, &[]);
-                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                    pass.draw(0..6, 0..1);
+                    pass.set_bind_group(0, &batch.bind_group, &[]);
+                    pass.draw(batch.vertex_range.clone(), 0..1);
                 }
             }
 
             pass.set_pipeline(&self.rect_pipeline);
-            self.draw_rect_primitives(&mut pass, &scene.overlay_shapes);
+            self.draw_rect_batches(&mut pass, overlay_vertex_buffer.as_ref(), &overlay_batches);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -381,34 +428,49 @@ impl Renderer {
         Ok(RenderStatus::Rendered)
     }
 
-    fn draw_rect_primitives<'a>(
+    fn draw_rect_batches<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
-        primitives: &[RenderPrimitive],
+        vertex_buffer: Option<&'a wgpu::Buffer>,
+        batches: &[PrimitiveBatch],
     ) {
+        let Some(vertex_buffer) = vertex_buffer else {
+            return;
+        };
+
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        for batch in batches {
+            if !self.apply_scissor(pass, batch.clip_rect) {
+                continue;
+            }
+
+            pass.draw(batch.vertex_range.clone(), 0..1);
+        }
+    }
+
+    fn rect_batches_for(&self, primitives: &[RenderPrimitive]) -> (Vec<RectVertex>, Vec<PrimitiveBatch>) {
+        let mut vertices = Vec::with_capacity(primitives.len() * 6);
+        let mut batches = Vec::with_capacity(primitives.len());
+
         for primitive in primitives {
             if primitive.rect.width <= 0.0 || primitive.rect.height <= 0.0 {
                 continue;
             }
-            if !self.apply_scissor(pass, primitive.clip_rect) {
-                continue;
-            }
 
-            let vertices = RectVertex::from_primitive(
+            let start = vertices.len() as u32;
+            vertices.extend_from_slice(&RectVertex::from_primitive(
                 *primitive,
                 self.config.width as f32,
                 self.config.height as f32,
-            );
-            let vertex_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tgui-rect-vertices"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.draw(0..6, 0..1);
+            ));
+            let end = vertices.len() as u32;
+            batches.push(PrimitiveBatch {
+                clip_rect: primitive.clip_rect,
+                vertex_range: start..end,
+            });
         }
+
+        (vertices, batches)
     }
 
     fn apply_scissor<'a>(

@@ -92,7 +92,7 @@ pub use animation::{
     AnimationSpec, AnimationStatus, Easing, FillMode, Keyframe, Keyframes, Playback,
     PlaybackDirection, Repeat, Transition,
 };
-pub use application::Application;
+pub use application::{Application, WindowClosePolicy, WindowRole, WindowSpec};
 pub use foundation::binding::{Binding, Observable, ViewModelContext};
 pub use foundation::color::Color;
 pub use foundation::error::TguiError;
